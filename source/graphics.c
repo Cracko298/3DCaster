@@ -1,6 +1,5 @@
 #include "common.h"
 
-
 void put_pixel_raw(u8 *fb, int screen_w, int screen_h, int x, int y, Color c) {
     if (x < 0 || y < 0 || x >= screen_w || y >= screen_h) return;
 

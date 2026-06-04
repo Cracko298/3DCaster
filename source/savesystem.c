@@ -524,3 +524,120 @@ void prompt_rename_slot(int slot) {
     if (slot == g_slot) snprintf(g_level_name, sizeof(g_level_name), "%s", name);
     snprintf(g_status, sizeof(g_status), "RENAMED SLOT %d", slot);
 }
+
+
+static void clamp_app_settings(void) {
+    g_fov_degrees = clampf32(g_fov_degrees, FOV_MIN_DEGREES, FOV_MAX_DEGREES);
+    g_level_depth = clampf32(g_level_depth, 0.50f, 2.00f);
+    g_dof_start = clampf32(g_dof_start, 4.0f, 32.0f);
+    g_dof_strength = clampf32(g_dof_strength, 0.10f, 1.00f);
+}
+
+static bool parse_app_settings_text(const char *txt) {
+    if (!txt || strncmp(txt, "3DCASTERCFG1", 12) != 0) return false;
+
+    float fov = FOV_DEGREES;
+    float depth = 1.0f;
+    int bob = 1;
+    int stereo = 0;
+    int dof = 0;
+    float dof_start = 10.0f;
+    float dof_strength = 0.55f;
+    int aa = 0;
+    int fast = 0;
+
+    const char *p = txt;
+    while (*p) {
+        if (sscanf(p, "FOV %f", &fov) == 1) {
+            /* handled */
+        } else if (sscanf(p, "DEPTH %f", &depth) == 1) {
+            /* handled */
+        } else if (sscanf(p, "BOB %d", &bob) == 1) {
+            /* handled */
+        } else if (sscanf(p, "STEREO3D %d", &stereo) == 1) {
+            /* handled */
+        } else if (sscanf(p, "DOF %d", &dof) == 1) {
+            /* handled */
+        } else if (sscanf(p, "DOFSTART %f", &dof_start) == 1) {
+            /* handled */
+        } else if (sscanf(p, "DOFSTRENGTH %f", &dof_strength) == 1) {
+            /* handled */
+        } else if (sscanf(p, "AA %d", &aa) == 1) {
+            /* handled */
+        } else if (sscanf(p, "FAST %d", &fast) == 1) {
+            /* handled */
+        }
+
+        const char *next = strchr(p, '\n');
+        if (!next) break;
+        p = next + 1;
+    }
+
+    g_fov_degrees = fov;
+    g_level_depth = depth;
+    g_view_bob = bob != 0;
+    g_3d_enabled = stereo != 0;
+    g_dof_enabled = dof != 0;
+    g_dof_start = dof_start;
+    g_dof_strength = dof_strength;
+    g_antialiasing = aa != 0;
+    g_fast_render = fast != 0;
+    clamp_app_settings();
+
+    if (!g_view_bob) {
+        g_bob_phase = 0.0f;
+        g_bob_amount = 0.0f;
+        g_camera_speed = 0.0f;
+    }
+
+    return true;
+}
+
+bool load_app_settings(void) {
+    if (!g_fs_ready) return false;
+
+    uint8_t *data = NULL;
+    size_t size = 0;
+
+    if (!fs_read_whole_file(SETTINGS_FS_PRIMARY, &data, &size)) {
+        if (!fs_read_whole_file(SETTINGS_FS_BACKUP, &data, &size)) return false;
+    }
+
+    char *txt = (char*)malloc(size + 1);
+    if (!txt) {
+        free(data);
+        return false;
+    }
+
+    memcpy(txt, data, size);
+    txt[size] = '\0';
+    free(data);
+
+    bool ok = parse_app_settings_text(txt);
+    free(txt);
+    return ok;
+}
+
+bool save_app_settings(void) {
+    if (!g_fs_ready) return false;
+
+    clamp_app_settings();
+
+    char buf[256];
+    int n = snprintf(buf, sizeof(buf),
+                     "3DCASTERCFG1\nFOV %.1f\nDEPTH %.2f\nBOB %d\nSTEREO3D %d\nDOF %d\nDOFSTART %.1f\nDOFSTRENGTH %.2f\nAA %d\nFAST %d\n",
+                     g_fov_degrees,
+                     g_level_depth,
+                     g_view_bob ? 1 : 0,
+                     g_3d_enabled ? 1 : 0,
+                     g_dof_enabled ? 1 : 0,
+                     g_dof_start,
+                     g_dof_strength,
+                     g_antialiasing ? 1 : 0,
+                     g_fast_render ? 1 : 0);
+    if (n <= 0 || n >= (int)sizeof(buf)) return false;
+
+    bool primary_ok = fs_write_whole_file(SETTINGS_FS_PRIMARY, (const uint8_t*)buf, (size_t)n);
+    bool backup_ok = fs_write_whole_file(SETTINGS_FS_BACKUP, (const uint8_t*)buf, (size_t)n);
+    return primary_ok || backup_ok;
+}

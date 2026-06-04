@@ -5,31 +5,94 @@ void draw_sky_floor(u8 *fb) {
     fill_rect_raw(fb, TOP_W, TOP_H, 0, TOP_H / 2, TOP_W, TOP_H, (Color){45, 42, 38});
 }
 
-void render_raycast(const Level *lv) {
-    if (lv->width < 3 || lv->height < 3 || lv->width > MAX_MAP_W || lv->height > MAX_MAP_H) return;
-    u8 *fb = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL);
+static Color blend_color(Color a, Color b, float t) {
+    t = clampf32(t, 0.0f, 1.0f);
+    float inv = 1.0f - t;
+    Color out;
+    out.r = (uint8_t)(a.r * inv + b.r * t + 0.5f);
+    out.g = (uint8_t)(a.g * inv + b.g * t + 0.5f);
+    out.b = (uint8_t)(a.b * inv + b.b * t + 0.5f);
+    return out;
+}
+
+static Color apply_dof_fade(Color c, float distance) {
+    if (!g_dof_enabled) return c;
+
+    float start = clampf32(g_dof_start, 4.0f, 32.0f);
+    float strength = clampf32(g_dof_strength, 0.10f, 1.00f);
+    if (distance <= start) return c;
+
+    float fade = clampf32((distance - start) / 18.0f, 0.0f, 1.0f) * strength;
+    return blend_color(c, (Color){22, 24, 30}, fade);
+}
+
+static void draw_column_aa(u8 *fb, int sx0, int sx1, int sy0, int sy1, Color c,
+                           int prev_sy0, int prev_sy1, Color prev_c) {
+    if (!g_antialiasing) return;
+
+    Color edge = blend_color(c, (Color){8, 8, 8}, 0.35f);
+    if (sy1 - sy0 > 4) {
+        fill_rect_raw(fb, TOP_W, TOP_H, sx0, sy0, sx1, sy0 + 1, edge);
+        fill_rect_raw(fb, TOP_W, TOP_H, sx0, sy1 - 1, sx1, sy1, edge);
+    }
+
+    if (prev_sy1 > prev_sy0 && (abs(sy0 - prev_sy0) > 2 || abs(sy1 - prev_sy1) > 2)) {
+        int seam_y0 = sy0 < prev_sy0 ? sy0 : prev_sy0;
+        int seam_y1 = sy1 > prev_sy1 ? sy1 : prev_sy1;
+        if (seam_y0 < 0) seam_y0 = 0;
+        if (seam_y1 > TOP_H) seam_y1 = TOP_H;
+        if (seam_y1 > seam_y0) {
+            Color seam = blend_color(c, prev_c, 0.50f);
+            fill_rect_raw(fb, TOP_W, TOP_H, sx0, seam_y0, sx0 + 1, seam_y1, seam);
+        }
+    }
+}
+
+static void render_raycast_eye(const Level *lv, gfx3dSide_t side, float eye_offset) {
+    u8 *fb = gfxGetFramebuffer(GFX_TOP, side, NULL, NULL);
     if (!fb) return;
     draw_sky_floor(fb);
 
-    float pos_x = lv->player_x;
-    float pos_y = lv->player_y;
-    float cam_z = lv->player_z + EYE_HEIGHT;
-    float angle = g_render_angle_override ? g_render_angle : lv->player_angle;
+    const int map_w = lv->width;
+    const int map_h = lv->height;
+    const uint8_t *tiles = lv->tiles;
 
+    float angle = g_render_angle_override ? g_render_angle : lv->player_angle;
     float dir_x = cosf(angle);
     float dir_y = sinf(angle);
-    float plane_len = tanf((FOV_DEGREES * PI_F / 180.0f) * 0.5f);
+    float right_x = -dir_y;
+    float right_y = dir_x;
+
+    float pos_x = lv->player_x + right_x * eye_offset;
+    float pos_y = lv->player_y + right_y * eye_offset;
+    float depth = clampf32(g_level_depth, 0.50f, 2.00f);
+    float cam_z = (lv->player_z + EYE_HEIGHT) * depth;
+
+    float fov = clampf32(g_fov_degrees, FOV_MIN_DEGREES, FOV_MAX_DEGREES);
+    float plane_len = tanf((fov * PI_F / 180.0f) * 0.5f);
     float plane_x = -dir_y * plane_len;
     float plane_y = dir_x * plane_len;
 
-    int max_steps = lv->width + lv->height + 8;
-    float center_y = RENDER_H * 0.5f;
+    int max_steps = map_w + map_h + 8;
+    int column_step = g_fast_render ? 2 : 1;
+    if (g_antialiasing) column_step = 1;
 
-    for (int x = 0; x < RENDER_W; x++) {
-        float camera_x = (2.0f * (float)x / (float)RENDER_W) - 1.0f;
-        float ray_x = dir_x + plane_x * camera_x;
-        float ray_y = dir_y + plane_y * camera_x;
+    float bob_y = 0.0f;
+    if (!g_render_angle_override && g_view_bob) {
+        bob_y = sinf(g_bob_phase) * g_bob_amount;
+    }
+    float center_y = RENDER_H * 0.5f + (g_render_angle_override ? 0.0f : g_camera_pitch) + bob_y;
 
+    float ray_x = dir_x - plane_x;
+    float ray_y = dir_y - plane_y;
+    float ray_step_x = (2.0f * plane_x / (float)RENDER_W) * (float)column_step;
+    float ray_step_y = (2.0f * plane_y / (float)RENDER_W) * (float)column_step;
+
+    int prev_sy0 = -1;
+    int prev_sy1 = -1;
+    Color prev_c = {0, 0, 0};
+
+    for (int x = 0; x < RENDER_W; x += column_step, ray_x += ray_step_x, ray_y += ray_step_y) {
         int map_x = (int)pos_x;
         int map_y = (int)pos_y;
 
@@ -58,38 +121,31 @@ void render_raycast(const Level *lv) {
         }
 
         uint8_t hit_tile = 0;
-        int side = 0;
+        int side_hit = 0;
 
         for (int s = 0; s < max_steps; s++) {
             if (side_x < side_y) {
                 side_x += delta_x;
                 map_x += step_x;
-                side = 0;
+                side_hit = 0;
             } else {
                 side_y += delta_y;
                 map_y += step_y;
-                side = 1;
+                side_hit = 1;
             }
 
-            if (map_x < 0 || map_y < 0 || map_x >= lv->width || map_y >= lv->height) {
+            if (map_x < 0 || map_y < 0 || map_x >= map_w || map_y >= map_h) {
                 hit_tile = 1;
                 break;
             }
 
-            hit_tile = lv->tiles[tile_index(lv, map_x, map_y)];
+            hit_tile = tiles[map_y * map_w + map_x];
             if (hit_tile) break;
         }
 
         if (!hit_tile) continue;
 
-        float perp;
-        if (side == 0) {
-            float denom = fabsf(ray_x) > 0.000001f ? ray_x : 0.000001f;
-            perp = ((float)map_x - pos_x + (1.0f - (float)step_x) * 0.5f) / denom;
-        } else {
-            float denom = fabsf(ray_y) > 0.000001f ? ray_y : 0.000001f;
-            perp = ((float)map_y - pos_y + (1.0f - (float)step_y) * 0.5f) / denom;
-        }
+        float perp = (side_hit == 0) ? (side_x - delta_x) : (side_y - delta_y);
         if (perp < 0.001f) perp = 0.001f;
 
         float z0 = 0.0f;
@@ -98,6 +154,8 @@ void render_raycast(const Level *lv) {
             z0 = PLATFORM_BOTTOM;
             z1 = PLATFORM_TOP;
         }
+        z0 *= depth;
+        z1 *= depth;
 
         float proj = (float)RENDER_H / perp;
         int draw_start = (int)(center_y + (cam_z - z1) * proj);
@@ -109,15 +167,17 @@ void render_raycast(const Level *lv) {
 
         Color base = WALL_COLORS[hit_tile & 7];
         float shade = 1.0f / (1.0f + perp * 0.12f);
-        if (side == 1) shade *= 0.72f;
+        if (side_hit == 1) shade *= 0.72f;
         if (hit_tile == PLATFORM_TILE) shade *= 0.95f;
-        Color c = shade_color(base, shade);
+        Color c = apply_dof_fade(shade_color(base, shade), perp);
 
         int sx0 = x * PIXEL_SCALE;
-        int sx1 = sx0 + PIXEL_SCALE;
+        int sx1 = sx0 + PIXEL_SCALE * column_step;
+        if (sx1 > TOP_W) sx1 = TOP_W;
         int sy0 = draw_start * PIXEL_SCALE;
         int sy1 = (draw_end + 1) * PIXEL_SCALE;
         fill_rect_raw(fb, TOP_W, TOP_H, sx0, sy0, sx1, sy1, c);
+        draw_column_aa(fb, sx0, sx1, sy0, sy1, c, prev_sy0, prev_sy1, prev_c);
 
         if (hit_tile == PLATFORM_TILE) {
             Color edge = c;
@@ -126,6 +186,10 @@ void render_raycast(const Level *lv) {
             edge.b = (edge.b > 215) ? 255 : edge.b + 40;
             fill_rect_raw(fb, TOP_W, TOP_H, sx0, sy0, sx1, sy0 + PIXEL_SCALE, edge);
         }
+
+        prev_sy0 = sy0;
+        prev_sy1 = sy1;
+        prev_c = c;
     }
 
     Color white = {225, 225, 225};
@@ -141,23 +205,37 @@ void render_raycast(const Level *lv) {
     }
 }
 
-#define EDITOR_MAP_Y 8
-#define EDITOR_MAP_H 204
-#define PALETTE_Y 220
-#define PALETTE_X 4
-#define PALETTE_STEP 22
-#define PALETTE_W 18
-#define PALETTE_H 16
+void render_raycast(const Level *lv) {
+    if (lv->width < 3 || lv->height < 3 || lv->width > MAX_MAP_W || lv->height > MAX_MAP_H) return;
+
+    bool stereo = g_3d_enabled && !g_render_angle_override;
+    gfxSet3D(stereo);
+
+    if (stereo) {
+        render_raycast_eye(lv, GFX_LEFT, -0.025f);
+        render_raycast_eye(lv, GFX_RIGHT, 0.025f);
+    } else {
+        render_raycast_eye(lv, GFX_LEFT, 0.0f);
+    }
+}
 
 void editor_layout(const Level *lv, int *cell, int *ox, int *oy) {
-    int c_x = (BOT_W - 8) / lv->width;
-    int c_y = EDITOR_MAP_H / lv->height;
+    int vx, vy, vw, vh;
+    editor_view_bounds(lv, &vx, &vy, &vw, &vh);
+    (void)vx;
+    (void)vy;
+
+    if (vw < 1) vw = 1;
+    if (vh < 1) vh = 1;
+
+    int c_x = (BOT_W - 8) / vw;
+    int c_y = EDITOR_MAP_H / vh;
     int c = c_x < c_y ? c_x : c_y;
-    if (c > 3) c = 3;
     if (c < 1) c = 1;
+
     if (cell) *cell = c;
-    if (ox) *ox = (BOT_W - lv->width * c) / 2;
-    if (oy) *oy = EDITOR_MAP_Y;
+    if (ox) *ox = (BOT_W - vw * c) / 2;
+    if (oy) *oy = EDITOR_MAP_Y + (EDITOR_MAP_H - vh * c) / 2;
 }
 
 Color map_tile_color(uint8_t tile) {
@@ -178,6 +256,20 @@ void draw_tile_palette(u8 *fb) {
     }
 }
 
+static void draw_editor_button(u8 *fb, int x0, int y0, int x1, int y1, const char *label, bool active) {
+    Color border = active ? (Color){90, 120, 170} : (Color){45, 45, 55};
+    Color fill = active ? (Color){22, 30, 46} : (Color){14, 14, 18};
+    Color text = active ? (Color){230, 238, 255} : (Color){115, 115, 125};
+    fill_rect_raw(fb, BOT_W, BOT_H, x0, y0, x1, y1, border);
+    fill_rect_raw(fb, BOT_W, BOT_H, x0 + 1, y0 + 1, x1 - 1, y1 - 1, fill);
+    int len = 0;
+    while (label && label[len]) len++;
+    int tx = x0 + ((x1 - x0) - len * 4) / 2;
+    int ty = y0 + ((y1 - y0) - 5) / 2;
+    if (tx < x0 + 2) tx = x0 + 2;
+    draw_text3x5(fb, BOT_W, BOT_H, tx, ty, label, text, 1);
+}
+
 void render_bottom_map(void) {
     u8 *fb = gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, NULL, NULL);
     if (!fb) return;
@@ -186,41 +278,74 @@ void render_bottom_map(void) {
     const Level *lv = &g_level;
     if (lv->width < 3 || lv->height < 3 || lv->width > MAX_MAP_W || lv->height > MAX_MAP_H) return;
 
+    editor_clamp_view(lv);
+
     int cell, ox, oy;
+    int vx, vy, vw, vh;
     editor_layout(lv, &cell, &ox, &oy);
+    editor_view_bounds(lv, &vx, &vy, &vw, &vh);
 
-    fill_rect_raw(fb, BOT_W, BOT_H, ox - 2, oy - 2, ox + lv->width * cell + 2, oy + lv->height * cell + 2, (Color){4, 4, 4});
+    fill_rect_raw(fb, BOT_W, BOT_H, ox - 2, oy - 2, ox + vw * cell + 2, oy + vh * cell + 2, (Color){4, 4, 4});
 
-    for (int y = 0; y < lv->height; y++) {
-        for (int x = 0; x < lv->width; x++) {
-            uint8_t tile = tile_at(lv, x, y);
+    for (int y = 0; y < vh; y++) {
+        for (int x = 0; x < vw; x++) {
+            int tx = vx + x;
+            int ty = vy + y;
+            uint8_t tile = tile_at(lv, tx, ty);
             Color c = map_tile_color(tile);
             fill_rect_raw(fb, BOT_W, BOT_H, ox + x * cell, oy + y * cell, ox + (x + 1) * cell, oy + (y + 1) * cell, c);
+
+            if (cell >= 10) {
+                fill_rect_raw(fb, BOT_W, BOT_H, ox + x * cell, oy + y * cell, ox + (x + 1) * cell, oy + y * cell + 1, (Color){8,8,8});
+                fill_rect_raw(fb, BOT_W, BOT_H, ox + x * cell, oy + y * cell, ox + x * cell + 1, oy + (y + 1) * cell, (Color){8,8,8});
+            }
         }
     }
 
-    int px = ox + (int)(lv->player_x * cell);
-    int py = oy + (int)(lv->player_y * cell);
-    fill_rect_raw(fb, BOT_W, BOT_H, px - 2, py - 2, px + 3, py + 3, (Color){255, 60, 60});
-    int ax = px + (int)(cosf(lv->player_angle) * cell * 3.0f);
-    int ay = py + (int)(sinf(lv->player_angle) * cell * 3.0f);
-    fill_rect_raw(fb, BOT_W, BOT_H, ax - 1, ay - 1, ax + 2, ay + 2, (Color){255, 160, 160});
+    if ((int)lv->player_x >= vx && (int)lv->player_x < vx + vw && (int)lv->player_y >= vy && (int)lv->player_y < vy + vh) {
+        int px = ox + (int)((lv->player_x - (float)vx) * cell);
+        int py = oy + (int)((lv->player_y - (float)vy) * cell);
+        int pr = cell >= 10 ? 3 : 2;
+        fill_rect_raw(fb, BOT_W, BOT_H, px - pr, py - pr, px + pr + 1, py + pr + 1, (Color){255, 60, 60});
+        int ax = px + (int)(cosf(lv->player_angle) * cell * 1.8f);
+        int ay = py + (int)(sinf(lv->player_angle) * cell * 1.8f);
+        fill_rect_raw(fb, BOT_W, BOT_H, ax - 1, ay - 1, ax + 2, ay + 2, (Color){255, 160, 160});
+    }
 
-    fill_rect_raw(fb, BOT_W, BOT_H, 0, 212, BOT_W, BOT_H, (Color){3, 3, 3});
-    draw_tile_palette(fb);
+    fill_rect_raw(fb, BOT_W, BOT_H, 0, EDITOR_CTRL_Y, BOT_W, BOT_H, (Color){3, 3, 3});
 
     if (g_edit_mode) {
         draw_text3x5(fb, BOT_W, BOT_H, 4, 213, "EDIT", (Color){120, 240, 120}, 1);
         draw_text_number(fb, BOT_W, BOT_H, 28, 213, g_dirty ? "S*" : "S", g_slot, (Color){245, 245, 245}, 1);
-        draw_text_number(fb, BOT_W, BOT_H, 48, 213, "T", g_selected_tile, WALL_COLORS[g_selected_tile & 7], 1);
-        draw_text3x5(fb, BOT_W, BOT_H, 172, 213, "A SAVE START MENU", (Color){220, 220, 220}, 1);
-    } else {
-        draw_text3x5(fb, BOT_W, BOT_H, 4, 213, "PLAY", (Color){120, 190, 255}, 1);
-        draw_text_number(fb, BOT_W, BOT_H, 30, 213, g_dirty ? "S*" : "S", g_slot, (Color){245, 245, 245}, 1);
-        draw_text3x5(fb, BOT_W, BOT_H, 176, 213, "START MENU", (Color){220, 220, 220}, 1);
-    }
+        draw_text_number(fb, BOT_W, BOT_H, 52, 213, "T", g_selected_tile, WALL_COLORS[g_selected_tile & 7], 1);
+        if (g_editor_zoom_tiles > 0) {
+            char zoom_buf[24];
+            snprintf(zoom_buf, sizeof(zoom_buf), "Z%d X%d Y%d", g_editor_zoom_tiles, vx, vy);
+            draw_text3x5(fb, BOT_W, BOT_H, 82, 213, zoom_buf, (Color){220, 230, 255}, 1);
+        } else {
+            draw_text3x5(fb, BOT_W, BOT_H, 82, 213, "FIT", (Color){220, 230, 255}, 1);
+        }
 
-    draw_text3x5(fb, BOT_W, BOT_H, 170, 226, g_edit_mode ? "B ERASE X SPAWN SEL SIZE" : "B SPRINT A JUMP", (Color){200, 200, 200}, 1);
+        draw_tile_palette(fb);
+
+        bool can_pan = g_editor_zoom_tiles > 0;
+        draw_editor_button(fb, 184, 221, 203, 240, "-", true);
+        draw_editor_button(fb, 206, 221, 225, 240, "+", true);
+        draw_editor_button(fb, 228, 221, 253, 240, "FIT", true);
+        draw_editor_button(fb, 258, 221, 276, 240, "L", can_pan);
+        draw_editor_button(fb, 279, 212, 297, 226, "U", can_pan);
+        draw_editor_button(fb, 279, 226, 297, 240, "D", can_pan);
+        draw_editor_button(fb, 300, 221, 320, 240, "R", can_pan);
+    } else {
+        draw_text3x5(fb, BOT_W, BOT_H, 4, 214, "PLAY", (Color){120, 190, 255}, 1);
+        draw_text_number(fb, BOT_W, BOT_H, 30, 214, g_dirty ? "S*" : "S", g_slot, (Color){245, 245, 245}, 1);
+        draw_text3x5(fb, BOT_W, BOT_H, 4, 224, "CPAD MOVE", (Color){205, 225, 255}, 1);
+        draw_text3x5(fb, BOT_W, BOT_H, 96, 224, "LR/C LOOK", (Color){205, 225, 255}, 1);
+        draw_text3x5(fb, BOT_W, BOT_H, 188, 224, "TOUCH SIDE", (Color){205, 225, 255}, 1);
+        draw_text3x5(fb, BOT_W, BOT_H, 4, 232, "B SPRINT", (Color){230, 230, 210}, 1);
+        draw_text3x5(fb, BOT_W, BOT_H, 96, 232, "A JUMP", (Color){230, 230, 210}, 1);
+        draw_text3x5(fb, BOT_W, BOT_H, 188, 232, "START MENU", (Color){230, 230, 210}, 1);
+    }
 }
 
 const char *menu_action_name(int action) {
@@ -231,8 +356,18 @@ const char *menu_action_name(int action) {
         case MENU_ACTION_DUPLICATE: return "DUP";
         case MENU_ACTION_RENAME: return "NAME";
         case MENU_ACTION_DELETE: return "DELETE";
+        case MENU_ACTION_SETTINGS: return "SETTINGS";
         default: return "?";
     }
+}
+
+static void draw_settings_row(u8 *fb, int row, const char *label, const char *value) {
+    int y = 176 + row * 7;
+    Color bg = (g_settings_cursor == row) ? (Color){50, 66, 96} : (Color){12, 14, 24};
+    Color fg = (g_settings_cursor == row) ? (Color){255, 230, 150} : (Color){225, 225, 225};
+    fill_rect_raw(fb, BOT_W, BOT_H, 8, y - 1, BOT_W - 8, y + 6, bg);
+    draw_text3x5(fb, BOT_W, BOT_H, 14, y, label, fg, 1);
+    draw_text3x5(fb, BOT_W, BOT_H, 170, y, value, fg, 1);
 }
 
 void render_world_menu(void) {
@@ -277,7 +412,28 @@ void render_world_menu(void) {
 
     fill_rect_raw(fb, BOT_W, BOT_H, 0, 182, BOT_W, BOT_H, (Color){4, 4, 8});
 
-    if (g_resize_menu) {
+    if (g_settings_menu) {
+        char fov_buf[24];
+        char depth_buf[24];
+        char dof_start_buf[24];
+        char dof_str_buf[24];
+        snprintf(fov_buf, sizeof(fov_buf), "%d", (int)(g_fov_degrees + 0.5f));
+        snprintf(depth_buf, sizeof(depth_buf), "%d PCT", (int)(g_level_depth * 100.0f + 0.5f));
+        snprintf(dof_start_buf, sizeof(dof_start_buf), "%d", (int)(g_dof_start + 0.5f));
+        snprintf(dof_str_buf, sizeof(dof_str_buf), "%d PCT", (int)(g_dof_strength * 100.0f + 0.5f));
+
+        fill_rect_raw(fb, BOT_W, BOT_H, 0, 166, BOT_W, BOT_H, (Color){4, 4, 8});
+        draw_text3x5(fb, BOT_W, BOT_H, 8, 166, "SETTINGS  D<> CHANGE  A TOGGLE  X RESET  B BACK", (Color){255,220,140}, 1);
+        draw_settings_row(fb, 0, "FOV", fov_buf);
+        draw_settings_row(fb, 1, "LEVEL DEPTH", depth_buf);
+        draw_settings_row(fb, 2, "VIEW BOB", g_view_bob ? "ON" : "OFF");
+        draw_settings_row(fb, 3, "3D SUPPORT", g_3d_enabled ? "ON" : "OFF");
+        draw_settings_row(fb, 4, "DOF FADE", g_dof_enabled ? "ON" : "OFF");
+        draw_settings_row(fb, 5, "DOF DIST", dof_start_buf);
+        draw_settings_row(fb, 6, "DOF STR", dof_str_buf);
+        draw_settings_row(fb, 7, "ANTI ALIAS", g_antialiasing ? "ON" : "OFF");
+        draw_settings_row(fb, 8, "FAST RENDER", g_fast_render ? "ON" : "OFF");
+    } else if (g_resize_menu) {
         draw_text3x5(fb, BOT_W, BOT_H, 8, 188, "RESIZE / NEW LEVEL", (Color){255,220,140}, 1);
         draw_text_number(fb, BOT_W, BOT_H, 8, 202, "WIDTH ", g_resize_w, (Color){230,230,230}, 2);
         draw_text_number(fb, BOT_W, BOT_H, 140, 202, "HEIGHT ", g_resize_h, (Color){230,230,230}, 2);

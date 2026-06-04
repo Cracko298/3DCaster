@@ -10,7 +10,15 @@ int main(int argc, char **argv) {
 
     Result fs_rc = fsInit();
     g_fs_ready = R_SUCCEEDED(fs_rc);
-    snprintf(g_status, sizeof(g_status), g_fs_ready ? "READY" : "FS INIT FAIL");
+
+    g_is_new3ds = false;
+    APT_CheckNew3DS(&g_is_new3ds);
+
+    bool settings_loaded = load_app_settings();
+    snprintf(g_status, sizeof(g_status), "%s %s%s",
+             g_fs_ready ? "READY" : "FS INIT FAIL",
+             g_is_new3ds ? "N3DS" : "O3DS",
+             settings_loaded ? " CFG" : "");
 
     new_open_level(&g_level);
     refresh_all_slots();
@@ -41,7 +49,7 @@ int main(int argc, char **argv) {
 
             if (!g_in_menu) {
                 if (g_edit_mode) {
-                    handle_editor_input(kDown, kHeld);
+                    handle_editor_input(dt, kDown, kHeld);
                 } else {
                     update_physics_and_movement(dt, kDown, kHeld);
                 }
