@@ -48,6 +48,60 @@ static void draw_column_aa(u8 *fb, int sx0, int sx1, int sy0, int sy1, Color c,
     }
 }
 
+
+static void draw_billboard_sprite(u8 *fb,
+                                  float cam_x, float cam_y,
+                                  float dir_x, float dir_y,
+                                  float plane_x, float plane_y,
+                                  float center_y,
+                                  const float *zbuf,
+                                  float sprite_x, float sprite_y,
+                                  float height_scale,
+                                  Color base) {
+    float rx = sprite_x - cam_x;
+    float ry = sprite_y - cam_y;
+    float det = plane_x * dir_y - dir_x * plane_y;
+    if (fabsf(det) < 0.000001f) return;
+
+    float inv_det = 1.0f / det;
+    float transform_x = inv_det * (dir_y * rx - dir_x * ry);
+    float transform_y = inv_det * (-plane_y * rx + plane_x * ry);
+    if (transform_y <= 0.08f) return;
+
+    int screen_x = (int)((RENDER_W * 0.5f) * (1.0f + transform_x / transform_y));
+    int sprite_h = (int)fabsf((RENDER_H / transform_y) * height_scale * clampf32(g_level_depth, 0.50f, 2.00f));
+    if (sprite_h < 4) sprite_h = 4;
+    if (sprite_h > RENDER_H * 2) sprite_h = RENDER_H * 2;
+
+    int sprite_w = sprite_h / 2;
+    if (sprite_w < 3) sprite_w = 3;
+
+    int draw_y0 = (int)(center_y - (float)sprite_h * 0.55f);
+    int draw_y1 = draw_y0 + sprite_h;
+    int draw_x0 = screen_x - sprite_w / 2;
+    int draw_x1 = screen_x + sprite_w / 2;
+
+    if (draw_y0 < 0) draw_y0 = 0;
+    if (draw_y1 >= RENDER_H) draw_y1 = RENDER_H - 1;
+    if (draw_x0 < 0) draw_x0 = 0;
+    if (draw_x1 >= RENDER_W) draw_x1 = RENDER_W - 1;
+    if (draw_x1 <= draw_x0 || draw_y1 <= draw_y0) return;
+
+    float shade = 1.0f / (1.0f + transform_y * 0.10f);
+    Color c = apply_dof_fade(shade_color(base, shade), transform_y);
+    Color edge = blend_color(c, (Color){255, 255, 255}, 0.25f);
+
+    for (int sx = draw_x0; sx <= draw_x1; sx++) {
+        if (transform_y >= zbuf[sx]) continue;
+        int px0 = sx * PIXEL_SCALE;
+        int px1 = px0 + PIXEL_SCALE;
+        int py0 = draw_y0 * PIXEL_SCALE;
+        int py1 = (draw_y1 + 1) * PIXEL_SCALE;
+        fill_rect_raw(fb, TOP_W, TOP_H, px0, py0, px1, py1, c);
+        if (sx == draw_x0 || sx == draw_x1) fill_rect_raw(fb, TOP_W, TOP_H, px0, py0, px1, py1, edge);
+    }
+}
+
 static void render_raycast_eye(const Level *lv, gfx3dSide_t side, float eye_offset) {
     u8 *fb = gfxGetFramebuffer(GFX_TOP, side, NULL, NULL);
     if (!fb) return;
@@ -91,6 +145,8 @@ static void render_raycast_eye(const Level *lv, gfx3dSide_t side, float eye_offs
     int prev_sy0 = -1;
     int prev_sy1 = -1;
     Color prev_c = {0, 0, 0};
+    float zbuf[RENDER_W];
+    for (int zi = 0; zi < RENDER_W; zi++) zbuf[zi] = 1.0e30f;
 
     for (int x = 0; x < RENDER_W; x += column_step, ray_x += ray_step_x, ray_y += ray_step_y) {
         int map_x = (int)pos_x;
@@ -139,14 +195,16 @@ static void render_raycast_eye(const Level *lv, gfx3dSide_t side, float eye_offs
                 break;
             }
 
-            hit_tile = tiles[map_y * map_w + map_x];
-            if (hit_tile) break;
+            hit_tile = tiles[map_y * map_w + map_x] & MAX_TILE_ID;
+            if (tile_blocks_raycast(hit_tile)) break;
+            hit_tile = 0;
         }
 
         if (!hit_tile) continue;
 
         float perp = (side_hit == 0) ? (side_x - delta_x) : (side_y - delta_y);
         if (perp < 0.001f) perp = 0.001f;
+        for (int zi = x; zi < x + column_step && zi < RENDER_W; zi++) zbuf[zi] = perp;
 
         float z0 = 0.0f;
         float z1 = 1.0f;
@@ -192,16 +250,47 @@ static void render_raycast_eye(const Level *lv, gfx3dSide_t side, float eye_offs
         prev_c = c;
     }
 
+    if (!g_render_angle_override && !g_edit_mode) {
+        if (g_has_success) {
+            draw_billboard_sprite(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, zbuf,
+                                  g_success_x, g_success_y, 0.70f, (Color){70, 255, 100});
+        }
+        for (int ei = 0; ei < g_enemy_count; ei++) {
+            Enemy *e = &g_enemies[ei];
+            if (!e->active) continue;
+            Color ec = e->state ? (Color){255, 75, 65} : (Color){220, 80, 220};
+            draw_billboard_sprite(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, zbuf,
+                                  e->x, e->y, 0.95f, ec);
+        }
+    }
+
     Color white = {225, 225, 225};
     fill_rect_raw(fb, TOP_W, TOP_H, TOP_W / 2 - 6, TOP_H / 2, TOP_W / 2 + 7, TOP_H / 2 + 1, white);
     fill_rect_raw(fb, TOP_W, TOP_H, TOP_W / 2, TOP_H / 2 - 6, TOP_W / 2 + 1, TOP_H / 2 + 7, white);
 
+    if (g_level_won && !g_render_angle_override) {
+        fill_rect_raw(fb, TOP_W, TOP_H, 102, 96, 298, 126, (Color){4, 35, 10});
+        draw_text3x5(fb, TOP_W, TOP_H, 130, 104, "SUCCESS", (Color){120,255,140}, 2);
+        if (g_random_play) draw_text3x5(fb, TOP_W, TOP_H, 124, 120, "A NEXT  START MENU", (Color){235,235,235}, 1);
+    }
+
     if (g_render_world_hud) {
         fill_rect_raw(fb, TOP_W, TOP_H, 4, 4, TOP_W - 4, 26, (Color){5, 5, 5});
-        draw_text3x5(fb, TOP_W, TOP_H, 8, 8, g_edit_mode ? "EDITOR" : "PLAY", g_edit_mode ? (Color){120,240,120} : (Color){120,190,255}, 2);
+        draw_text3x5(fb, TOP_W, TOP_H, 8, 8, g_edit_mode ? "EDITOR" : (g_random_play ? "RANDOM" : "PLAY"), g_edit_mode ? (Color){120,240,120} : (Color){120,190,255}, 2);
         draw_text_number(fb, TOP_W, TOP_H, 82, 8, g_dirty ? "SLOT* " : "SLOT ", g_slot, (Color){240, 240, 240}, 2);
-        draw_text_number(fb, TOP_W, TOP_H, 160, 8, "TILE ", g_selected_tile, WALL_COLORS[g_selected_tile & 7], 2);
+        draw_text_number(fb, TOP_W, TOP_H, 160, 8, "TILE ", g_selected_tile, map_tile_color(g_selected_tile), 2);
         draw_text3x5(fb, TOP_W, TOP_H, 246, 8, g_status, (Color){230, 230, 160}, 1);
+
+        if (g_debug_overlay && !g_render_angle_override) {
+            char dbg[96];
+            snprintf(dbg, sizeof(dbg), "FPS %d SPD %d EN %d FOV %d", (int)(g_fps_smooth + 0.5f),
+                     (int)(g_camera_speed * 100.0f + 0.5f), g_enemy_count, (int)(g_fov_degrees + 0.5f));
+            fill_rect_raw(fb, TOP_W, TOP_H, 4, 28, TOP_W - 4, 50, (Color){5, 5, 5});
+            draw_text3x5(fb, TOP_W, TOP_H, 8, 32, dbg, (Color){180, 240, 180}, 1);
+            snprintf(dbg, sizeof(dbg), "POS %d %d Z%d RAYS %d AA %d 3D %d", (int)lv->player_x, (int)lv->player_y,
+                     (int)(lv->player_z * 100.0f), g_fast_render ? 100 : 200, g_antialiasing ? 1 : 0, g_3d_enabled ? 1 : 0);
+            draw_text3x5(fb, TOP_W, TOP_H, 8, 42, dbg, (Color){180, 220, 255}, 1);
+        }
     }
 }
 
@@ -239,20 +328,33 @@ void editor_layout(const Level *lv, int *cell, int *ox, int *oy) {
 }
 
 Color map_tile_color(uint8_t tile) {
+    tile &= MAX_TILE_ID;
     if (tile == 0) return (Color){28, 28, 28};
     if (tile == PLATFORM_TILE) return (Color){40, 115, 120};
+    if (tile == TILE_AI_SPAWN) return (Color){190, 65, 210};
+    if (tile == TILE_SUCCESS) return (Color){65, 235, 95};
+    if (tile >= 8) return (Color){90, 90, 110};
     Color base = WALL_COLORS[tile & 7];
     return (Color){(uint8_t)(base.r / 2 + 55), (uint8_t)(base.g / 2 + 55), (uint8_t)(base.b / 2 + 55)};
 }
 
+static void draw_tile_label(u8 *fb, int x, int y, int t, Color c) {
+    char label[2];
+    label[0] = (char)((t < 10) ? ('0' + t) : ('A' + (t - 10)));
+    label[1] = '\0';
+    draw_text3x5(fb, BOT_W, BOT_H, x, y, label, c, 1);
+}
+
 void draw_tile_palette(u8 *fb) {
-    for (int t = 0; t < 8; t++) {
-        int x0 = PALETTE_X + t * PALETTE_STEP;
-        int y0 = PALETTE_Y;
+    for (int t = 0; t <= MAX_TILE_ID; t++) {
+        int row = t / 8;
+        int col = t & 7;
+        int x0 = PALETTE_X + col * PALETTE_STEP;
+        int y0 = 214 + row * 13;
         Color border = (t == g_selected_tile) ? (Color){255, 255, 255} : (Color){60, 60, 60};
-        fill_rect_raw(fb, BOT_W, BOT_H, x0 - 1, y0 - 1, x0 + PALETTE_W + 1, y0 + PALETTE_H + 1, border);
-        fill_rect_raw(fb, BOT_W, BOT_H, x0, y0, x0 + PALETTE_W, y0 + PALETTE_H, map_tile_color((uint8_t)t));
-        draw_digit(fb, BOT_W, BOT_H, x0 + 6, y0 + 5, t, (t == 0) ? (Color){230,230,230} : (Color){8,8,8}, 1);
+        fill_rect_raw(fb, BOT_W, BOT_H, x0 - 1, y0 - 1, x0 + PALETTE_W + 1, y0 + 11, border);
+        fill_rect_raw(fb, BOT_W, BOT_H, x0, y0, x0 + PALETTE_W, y0 + 10, map_tile_color((uint8_t)t));
+        draw_tile_label(fb, x0 + 7, y0 + 3, t, (t == 0) ? (Color){230,230,230} : (Color){8,8,8});
     }
 }
 
@@ -302,6 +404,20 @@ void render_bottom_map(void) {
         }
     }
 
+    if (!g_edit_mode) {
+        for (int ei = 0; ei < g_enemy_count; ei++) {
+            const Enemy *e = &g_enemies[ei];
+            if (!e->active) continue;
+            if ((int)e->x >= vx && (int)e->x < vx + vw && (int)e->y >= vy && (int)e->y < vy + vh) {
+                int ex = ox + (int)((e->x - (float)vx) * cell);
+                int ey = oy + (int)((e->y - (float)vy) * cell);
+                int er = cell >= 10 ? 3 : 2;
+                fill_rect_raw(fb, BOT_W, BOT_H, ex - er, ey - er, ex + er + 1, ey + er + 1,
+                              e->state ? (Color){255, 60, 60} : (Color){210, 70, 220});
+            }
+        }
+    }
+
     if ((int)lv->player_x >= vx && (int)lv->player_x < vx + vw && (int)lv->player_y >= vy && (int)lv->player_y < vy + vh) {
         int px = ox + (int)((lv->player_x - (float)vx) * cell);
         int py = oy + (int)((lv->player_y - (float)vy) * cell);
@@ -315,17 +431,6 @@ void render_bottom_map(void) {
     fill_rect_raw(fb, BOT_W, BOT_H, 0, EDITOR_CTRL_Y, BOT_W, BOT_H, (Color){3, 3, 3});
 
     if (g_edit_mode) {
-        draw_text3x5(fb, BOT_W, BOT_H, 4, 213, "EDIT", (Color){120, 240, 120}, 1);
-        draw_text_number(fb, BOT_W, BOT_H, 28, 213, g_dirty ? "S*" : "S", g_slot, (Color){245, 245, 245}, 1);
-        draw_text_number(fb, BOT_W, BOT_H, 52, 213, "T", g_selected_tile, WALL_COLORS[g_selected_tile & 7], 1);
-        if (g_editor_zoom_tiles > 0) {
-            char zoom_buf[24];
-            snprintf(zoom_buf, sizeof(zoom_buf), "Z%d X%d Y%d", g_editor_zoom_tiles, vx, vy);
-            draw_text3x5(fb, BOT_W, BOT_H, 82, 213, zoom_buf, (Color){220, 230, 255}, 1);
-        } else {
-            draw_text3x5(fb, BOT_W, BOT_H, 82, 213, "FIT", (Color){220, 230, 255}, 1);
-        }
-
         draw_tile_palette(fb);
 
         bool can_pan = g_editor_zoom_tiles > 0;
@@ -351,6 +456,7 @@ void render_bottom_map(void) {
 const char *menu_action_name(int action) {
     switch (action) {
         case MENU_ACTION_PLAY: return "PLAY";
+        case MENU_ACTION_RANDOM: return "RANDOM";
         case MENU_ACTION_EDIT: return "EDIT";
         case MENU_ACTION_RESIZE: return "RESIZE";
         case MENU_ACTION_DUPLICATE: return "DUP";
@@ -362,7 +468,7 @@ const char *menu_action_name(int action) {
 }
 
 static void draw_settings_row(u8 *fb, int row, const char *label, const char *value) {
-    int y = 176 + row * 7;
+    int y = 170 + row * 7;
     Color bg = (g_settings_cursor == row) ? (Color){50, 66, 96} : (Color){12, 14, 24};
     Color fg = (g_settings_cursor == row) ? (Color){255, 230, 150} : (Color){225, 225, 225};
     fill_rect_raw(fb, BOT_W, BOT_H, 8, y - 1, BOT_W - 8, y + 6, bg);
@@ -433,6 +539,7 @@ void render_world_menu(void) {
         draw_settings_row(fb, 6, "DOF STR", dof_str_buf);
         draw_settings_row(fb, 7, "ANTI ALIAS", g_antialiasing ? "ON" : "OFF");
         draw_settings_row(fb, 8, "FAST RENDER", g_fast_render ? "ON" : "OFF");
+        draw_settings_row(fb, 9, "DEBUG", g_debug_overlay ? "ON" : "OFF");
     } else if (g_resize_menu) {
         draw_text3x5(fb, BOT_W, BOT_H, 8, 188, "RESIZE / NEW LEVEL", (Color){255,220,140}, 1);
         draw_text_number(fb, BOT_W, BOT_H, 8, 202, "WIDTH ", g_resize_w, (Color){230,230,230}, 2);
