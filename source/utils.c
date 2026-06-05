@@ -103,6 +103,12 @@ bool tile_blocks_side(uint8_t tile, float z) {
     return false;
 }
 
+bool tile_blocks_raycast(uint8_t tile) {
+    if (tile >= 1 && tile <= 6) return true;
+    if (tile == PLATFORM_TILE) return true;
+    return false;
+}
+
 bool can_stand_at(const Level *lv, float x, float y, float z) {
     const float r = PLAYER_RADIUS;
     const float px[4] = { x - r, x + r, x - r, x + r };
