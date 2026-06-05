@@ -38,6 +38,9 @@ int main(int argc, char **argv) {
         float dt = (float)(now - last_tick) / tick_rate;
         last_tick = now;
         if (dt <= 0.0f || dt > 0.05f) dt = 1.0f / 60.0f;
+        g_frame_dt = dt;
+        float inst_fps = dt > 0.0001f ? (1.0f / dt) : 60.0f;
+        g_fps_smooth += (inst_fps - g_fps_smooth) * 0.08f;
 
         if (g_in_menu) {
             g_preview_spin += dt * 0.75f;
