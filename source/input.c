@@ -1,6 +1,5 @@
 #include "common.h"
 
-
 #define CSTICK_YAW_SPEED       2.60f
 #define TOUCH_YAW_PER_PIXEL    0.0105f
 
@@ -319,6 +318,353 @@ static void update_view_bob_from_speed(float dt, float speed, bool on_ground) {
     while (g_bob_phase >= TWO_PI_F) g_bob_phase -= TWO_PI_F;
 }
 
+
+static uint32_t rng_next(uint32_t *state) {
+    uint32_t x = *state ? *state : 0xA341316Cu;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *state = x ? x : 0xC8013EA4u;
+    return *state;
+}
+
+void reset_runtime_entities(void) {
+    memset(g_enemies, 0, sizeof(g_enemies));
+    g_enemy_count = 0;
+    g_has_success = false;
+    g_success_x = 0.0f;
+    g_success_y = 0.0f;
+    g_level_won = false;
+}
+
+void spawn_entities_from_level(const Level *lv) {
+    reset_runtime_entities();
+    if (!lv || lv->width < 3 || lv->height < 3 || lv->width > MAX_MAP_W || lv->height > MAX_MAP_H) return;
+
+    for (int y = 1; y < lv->height - 1; y++) {
+        for (int x = 1; x < lv->width - 1; x++) {
+            uint8_t t = lv->tiles[y * lv->width + x] & MAX_TILE_ID;
+            if (t == TILE_AI_SPAWN && g_enemy_count < MAX_ENEMIES) {
+                Enemy *e = &g_enemies[g_enemy_count++];
+                memset(e, 0, sizeof(*e));
+                e->active = true;
+                e->x = e->start_x = (float)x + 0.5f;
+                e->y = e->start_y = (float)y + 0.5f;
+                e->z = e->start_z = ground_height_at(lv, e->x, e->y, 0.0f);
+                e->angle = ((float)((x * 37 + y * 101) & 255) / 255.0f) * TWO_PI_F;
+                e->speed = 1.35f;
+                e->roam_timer = 0.25f + (float)((x + y) & 7) * 0.18f;
+                e->hp = 1;
+                e->state = 0;
+            } else if (t == TILE_SUCCESS && !g_has_success) {
+                g_has_success = true;
+                g_success_x = (float)x + 0.5f;
+                g_success_y = (float)y + 0.5f;
+            }
+        }
+    }
+}
+
+static bool ai_line_of_sight(const Level *lv, float x0, float y0, float x1, float y1) {
+    float dx = x1 - x0;
+    float dy = y1 - y0;
+    float dist = sqrtf(dx * dx + dy * dy);
+    if (dist < 0.001f) return true;
+
+    int steps = (int)(dist * 8.0f);
+    if (steps < 1) steps = 1;
+    if (steps > 160) steps = 160;
+
+    for (int i = 1; i < steps; i++) {
+        float t = (float)i / (float)steps;
+        int tx = (int)(x0 + dx * t);
+        int ty = (int)(y0 + dy * t);
+        if (tx < 0 || ty < 0 || tx >= lv->width || ty >= lv->height) return false;
+        if (tile_blocks_side(lv->tiles[ty * lv->width + tx], 0.0f)) return false;
+    }
+
+    return true;
+}
+
+static void reset_player_after_caught(Level *lv) {
+    if (!lv) return;
+    lv->player_x = g_play_start_x;
+    lv->player_y = g_play_start_y;
+    lv->player_z = g_play_start_z;
+    lv->player_vz = 0.0f;
+    lv->player_angle = g_play_start_angle;
+    lv->on_ground = true;
+
+    for (int i = 0; i < g_enemy_count; i++) {
+        Enemy *e = &g_enemies[i];
+        if (!e->active) continue;
+        e->x = e->start_x;
+        e->y = e->start_y;
+        e->z = e->start_z;
+        e->angle += 1.57f;
+    }
+
+    snprintf(g_status, sizeof(g_status), "CAUGHT - RESET");
+}
+
+static void ai_pick_roam_angle(Enemy *e) {
+    if (!e) return;
+    uint32_t r = rng_next(&g_random_seed);
+    e->angle = ((float)(r & 4095) / 4096.0f) * TWO_PI_F;
+    r = rng_next(&g_random_seed);
+    e->roam_timer = 0.75f + ((float)(r & 1023) / 1023.0f) * 1.75f;
+}
+
+static bool ai_can_spot_player(const Level *lv, const Enemy *e, float to_px, float to_py, float dist2) {
+    if (!lv || !e) return false;
+    const float sight_range = 13.0f;
+    if (dist2 > sight_range * sight_range) return false;
+    if (!ai_line_of_sight(lv, e->x, e->y, lv->player_x, lv->player_y)) return false;
+
+    if (dist2 < 2.25f) return true;
+
+    float dist = sqrtf(dist2);
+    if (dist < 0.001f) return true;
+    float look_x = cosf(e->angle);
+    float look_y = sinf(e->angle);
+    float dot = (look_x * to_px + look_y * to_py) / dist;
+    return dot > 0.34f;
+}
+
+static void update_enemies(Level *lv, float dt) {
+    if (!lv || g_level_won) return;
+
+    for (int i = 0; i < g_enemy_count; i++) {
+        Enemy *e = &g_enemies[i];
+        if (!e->active) continue;
+
+        float to_px = lv->player_x - e->x;
+        float to_py = lv->player_y - e->y;
+        float dist2 = to_px * to_px + to_py * to_py;
+
+        if (dist2 < 0.18f) {
+            reset_player_after_caught(lv);
+            return;
+        }
+
+        bool chase = ai_can_spot_player(lv, e, to_px, to_py, dist2);
+        float dir_x;
+        float dir_y;
+
+        if (chase && dist2 > 0.001f) {
+            float inv_dist = 1.0f / sqrtf(dist2);
+            dir_x = to_px * inv_dist;
+            dir_y = to_py * inv_dist;
+            e->angle = atan2f(dir_y, dir_x);
+            e->state = 1;
+        } else {
+            e->state = 0;
+            e->roam_timer -= dt;
+            if (e->roam_timer <= 0.0f) ai_pick_roam_angle(e);
+            dir_x = cosf(e->angle);
+            dir_y = sinf(e->angle);
+        }
+
+        float step = e->speed * (chase ? 1.28f : 0.48f) * dt;
+        float nx = e->x + dir_x * step;
+        float ny = e->y + dir_y * step;
+        bool moved = false;
+
+        if (can_stand_at(lv, nx, e->y, e->z)) {
+            e->x = nx;
+            moved = true;
+        }
+        if (can_stand_at(lv, e->x, ny, e->z)) {
+            e->y = ny;
+            moved = true;
+        }
+
+        if (!moved) {
+            if (chase) e->angle += 0.75f;
+            ai_pick_roam_angle(e);
+        }
+    }
+}
+
+static void check_success_tile(Level *lv) {
+    if (!lv || g_level_won) return;
+    int tx = (int)lv->player_x;
+    int ty = (int)lv->player_y;
+    if (tx < 0 || ty < 0 || tx >= lv->width || ty >= lv->height) return;
+
+    if ((lv->tiles[ty * lv->width + tx] & MAX_TILE_ID) == TILE_SUCCESS) {
+        g_level_won = true;
+        snprintf(g_status, sizeof(g_status), g_random_play ? "SUCCESS A NEXT START MENU" : "SUCCESS START MENU");
+    }
+}
+
+static void maze_carve_rect(Level *lv, int x0, int y0, int w, int h, uint8_t tile) {
+    if (!lv) return;
+    for (int y = y0; y < y0 + h; y++) {
+        for (int x = x0; x < x0 + w; x++) {
+            if (x > 0 && y > 0 && x < lv->width - 1 && y < lv->height - 1) {
+                lv->tiles[y * lv->width + x] = tile & MAX_TILE_ID;
+            }
+        }
+    }
+}
+
+static void maze_cell_origin(int cx, int cy, int *ox, int *oy) {
+    if (ox) *ox = 2 + cx * 4;
+    if (oy) *oy = 2 + cy * 4;
+}
+
+static void maze_carve_cell(Level *lv, int cx, int cy) {
+    int ox, oy;
+    maze_cell_origin(cx, cy, &ox, &oy);
+    maze_carve_rect(lv, ox, oy, 2, 2, 0);
+}
+
+static void maze_carve_connection(Level *lv, int cx, int cy, int nx, int ny) {
+    int ox, oy;
+    maze_cell_origin(cx, cy, &ox, &oy);
+
+    if (nx > cx) maze_carve_rect(lv, ox + 2, oy, 2, 2, 0);
+    else if (nx < cx) maze_carve_rect(lv, ox - 2, oy, 2, 2, 0);
+    else if (ny > cy) maze_carve_rect(lv, ox, oy + 2, 2, 2, 0);
+    else if (ny < cy) maze_carve_rect(lv, ox, oy - 2, 2, 2, 0);
+}
+
+void generate_random_maze(Level *lv, uint32_t seed) {
+    if (!lv) return;
+    if (seed == 0) seed = (uint32_t)svcGetSystemTick();
+    g_random_seed = seed ? seed : 1u;
+
+    memset(lv, 0, sizeof(*lv));
+    lv->width = RANDOM_MAZE_W;
+    lv->height = RANDOM_MAZE_H;
+
+    int n = lv->width * lv->height;
+    for (int i = 0; i < n; i++) lv->tiles[i] = 1;
+
+    const int cells_w = RANDOM_MAZE_CELLS_W;
+    const int cells_h = RANDOM_MAZE_CELLS_H;
+    const int cell_count = cells_w * cells_h;
+
+    uint8_t *visited = (uint8_t*)calloc((size_t)cell_count, 1);
+    int *stack_x = (int*)malloc(sizeof(int) * (size_t)cell_count);
+    int *stack_y = (int*)malloc(sizeof(int) * (size_t)cell_count);
+    if (!visited || !stack_x || !stack_y) {
+        free(visited);
+        free(stack_x);
+        free(stack_y);
+        new_open_level(lv);
+        return;
+    }
+
+    int top = 0;
+    stack_x[top] = 0;
+    stack_y[top] = 0;
+    top++;
+    visited[0] = 1;
+    maze_carve_cell(lv, 0, 0);
+
+    while (top > 0) {
+        int cx = stack_x[top - 1];
+        int cy = stack_y[top - 1];
+        int dirs[4] = {0, 1, 2, 3};
+
+        for (int i = 3; i > 0; i--) {
+            int j = (int)(rng_next(&g_random_seed) % (uint32_t)(i + 1));
+            int tmp = dirs[i];
+            dirs[i] = dirs[j];
+            dirs[j] = tmp;
+        }
+
+        bool carved = false;
+        for (int i = 0; i < 4; i++) {
+            int dx = 0;
+            int dy = 0;
+            if (dirs[i] == 0) dx = 1;
+            else if (dirs[i] == 1) dx = -1;
+            else if (dirs[i] == 2) dy = 1;
+            else dy = -1;
+
+            int nx = cx + dx;
+            int ny = cy + dy;
+            if (nx < 0 || ny < 0 || nx >= cells_w || ny >= cells_h) continue;
+            int ni = ny * cells_w + nx;
+            if (visited[ni]) continue;
+
+            maze_carve_connection(lv, cx, cy, nx, ny);
+            maze_carve_cell(lv, nx, ny);
+            visited[ni] = 1;
+            if (top < cell_count) {
+                stack_x[top] = nx;
+                stack_y[top] = ny;
+                top++;
+            }
+            carved = true;
+            break;
+        }
+
+        if (!carved) top--;
+    }
+
+    free(visited);
+    free(stack_x);
+    free(stack_y);
+
+    int start_ox, start_oy;
+    maze_cell_origin(0, 0, &start_ox, &start_oy);
+    lv->player_x = (float)start_ox + 1.0f;
+    lv->player_y = (float)start_oy + 1.0f;
+    lv->player_z = 0.0f;
+    lv->player_vz = 0.0f;
+    lv->player_angle = 0.0f;
+    lv->on_ground = true;
+
+    int exit_ox, exit_oy;
+    maze_cell_origin(cells_w - 1, cells_h - 1, &exit_ox, &exit_oy);
+    maze_carve_rect(lv, exit_ox, exit_oy, 2, 2, TILE_SUCCESS);
+
+    int placed = 0;
+    int target_enemies = 5;
+    int attempts = 0;
+    while (placed < target_enemies && attempts < 4000) {
+        attempts++;
+        int cx = (int)(rng_next(&g_random_seed) % (uint32_t)cells_w);
+        int cy = (int)(rng_next(&g_random_seed) % (uint32_t)cells_h);
+        if (cx < 4 && cy < 4) continue;
+        if (cx == cells_w - 1 && cy == cells_h - 1) continue;
+
+        int ox, oy;
+        maze_cell_origin(cx, cy, &ox, &oy);
+        if (lv->tiles[oy * lv->width + ox] != 0) continue;
+        lv->tiles[oy * lv->width + ox] = TILE_AI_SPAWN;
+        placed++;
+    }
+
+    snprintf(g_level_name, sizeof(g_level_name), "RANDOM %04lX", (unsigned long)(seed & 0xFFFFu));
+    force_valid_spawn(lv);
+}
+
+static void enter_random_seed_play(void) {
+    uint32_t seed = (uint32_t)svcGetSystemTick();
+    generate_random_maze(&g_level, seed);
+    g_random_play = true;
+    g_edit_mode = false;
+    g_in_menu = false;
+    g_resize_menu = false;
+    g_duplicate_menu = false;
+    g_delete_armed = false;
+    g_dirty = false;
+    g_camera_pitch = 0.0f;
+    s_touch_look_active = false;
+    editor_reset_view();
+    g_play_start_x = g_level.player_x;
+    g_play_start_y = g_level.player_y;
+    g_play_start_z = g_level.player_z;
+    g_play_start_angle = g_level.player_angle;
+    spawn_entities_from_level(&g_level);
+    snprintf(g_status, sizeof(g_status), "RANDOM SEED %04lX", (unsigned long)(seed & 0xFFFFu));
+}
+
 void enter_slot(bool edit_mode) {
     if (!load_bwl_slot(&g_level)) {
         new_open_level(&g_level);
@@ -335,6 +681,13 @@ void enter_slot(bool edit_mode) {
     g_camera_pitch = 0.0f;
     s_touch_look_active = false;
     editor_reset_view();
+    g_random_play = false;
+    g_play_start_x = g_level.player_x;
+    g_play_start_y = g_level.player_y;
+    g_play_start_z = g_level.player_z;
+    g_play_start_angle = g_level.player_angle;
+    if (edit_mode) reset_runtime_entities();
+    else spawn_entities_from_level(&g_level);
 }
 
 void apply_resize_menu(void) {
@@ -364,6 +717,7 @@ static void reset_settings_defaults(void) {
     g_dof_strength = 0.55f;
     g_antialiasing = false;
     g_fast_render = false;
+    g_debug_overlay = false;
     g_camera_pitch = 0.0f;
     g_bob_phase = 0.0f;
     g_bob_amount = 0.0f;
@@ -412,6 +766,10 @@ static void adjust_setting(int dir) {
         case 8:
             g_fast_render = !g_fast_render;
             snprintf(g_status, sizeof(g_status), "FAST RENDER %s", g_fast_render ? "ON" : "OFF");
+            break;
+        case 9:
+            g_debug_overlay = !g_debug_overlay;
+            snprintf(g_status, sizeof(g_status), "DEBUG %s", g_debug_overlay ? "ON" : "OFF");
             break;
     }
 
@@ -488,6 +846,9 @@ void handle_world_menu_input(u32 kDown) {
             case MENU_ACTION_PLAY:
                 enter_slot(false);
                 break;
+            case MENU_ACTION_RANDOM:
+                enter_random_seed_play();
+                break;
             case MENU_ACTION_EDIT:
                 enter_slot(true);
                 break;
@@ -525,6 +886,14 @@ void handle_world_menu_input(u32 kDown) {
 void update_physics_and_movement(float dt, u32 kDown, u32 kHeld) {
     Level *lv = &g_level;
 
+    if (g_level_won) {
+        update_view_bob_from_speed(dt, 0.0f, true);
+        if (g_random_play && (kDown & KEY_A)) {
+            enter_random_seed_play();
+        }
+        return;
+    }
+
     apply_vertical_physics(lv, dt, kDown, true);
     apply_lr_look(lv, dt, kHeld, true);
     apply_cstick_look(lv, dt, kHeld);
@@ -532,6 +901,8 @@ void update_physics_and_movement(float dt, u32 kDown, u32 kHeld) {
     float speed = 0.0f;
     apply_cpad_movement(lv, dt, kHeld, true, &speed);
     update_view_bob_from_speed(dt, speed, lv->on_ground);
+    update_enemies(lv, dt);
+    check_success_tile(lv);
 }
 
 static void update_editor_player(float dt, u32 kHeld) {
@@ -565,7 +936,7 @@ static bool handle_editor_touch_controls(const Level *lv, const touchPosition *t
     if (!tp || !(kDown & KEY_TOUCH)) return false;
     if (tp->py < EDITOR_CTRL_Y) return false;
 
-    if (tp->py >= PALETTE_Y - 2 && tp->px < 180) return false;
+    if (tp->px < 180) return false;
 
     if (touch_in_rect(tp, 184, 221, 203, 240)) {
         editor_zoom_out(lv);
@@ -612,15 +983,20 @@ void editor_touch(u32 kDown, u32 kHeld) {
 
     if (handle_editor_touch_controls(lv, &tp, kDown)) return;
 
-    if (tp.py >= PALETTE_Y - 2 && tp.px < 180) {
-        for (int t = 0; t < 8; t++) {
-            int x0 = PALETTE_X + t * PALETTE_STEP;
-            if (tp.px >= x0 - 2 && tp.px <= x0 + PALETTE_W + 2 && tp.py >= PALETTE_Y - 2 && tp.py <= PALETTE_Y + PALETTE_H + 2) {
+    if (tp.py >= EDITOR_CTRL_Y && tp.px < 180) {
+        for (int t = 0; t <= MAX_TILE_ID; t++) {
+            int row = t / 8;
+            int col = t & 7;
+            int x0 = PALETTE_X + col * PALETTE_STEP;
+            int y0 = 214 + row * 13;
+            if (tp.px >= x0 - 2 && tp.px <= x0 + PALETTE_W + 2 &&
+                tp.py >= y0 - 1 && tp.py <= y0 + 11) {
                 g_selected_tile = (uint8_t)t;
                 snprintf(g_status, sizeof(g_status), "TILE %d", g_selected_tile);
                 return;
             }
         }
+        return;
     }
 
     int cell, ox, oy;
@@ -702,11 +1078,11 @@ void handle_editor_input(float dt, u32 kDown, u32 kHeld) {
     if (kDown & KEY_DDOWN) editor_zoom_out(&g_level);
 
     if (kDown & KEY_DLEFT) {
-        g_selected_tile = (uint8_t)((g_selected_tile + 7) % 8);
+        g_selected_tile = (uint8_t)((g_selected_tile + MAX_TILE_ID) % (MAX_TILE_ID + 1));
         snprintf(g_status, sizeof(g_status), "TILE %d", g_selected_tile);
     }
     if (kDown & KEY_DRIGHT) {
-        g_selected_tile = (uint8_t)((g_selected_tile + 1) % 8);
+        g_selected_tile = (uint8_t)((g_selected_tile + 1) % (MAX_TILE_ID + 1));
         snprintf(g_status, sizeof(g_status), "TILE %d", g_selected_tile);
     }
 
