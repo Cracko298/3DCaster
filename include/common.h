@@ -44,7 +44,7 @@
 #define FOV_DEGREES 66.0f
 #define FOV_MIN_DEGREES 50.0f
 #define FOV_MAX_DEGREES 110.0f
-#define SETTINGS_ROW_COUNT 9
+#define SETTINGS_ROW_COUNT 10
 #define MOVE_SPEED 3.3f
 #define SPRINT_MULT 1.75f
 #define ROT_SPEED 2.35f
@@ -57,7 +57,14 @@
 #define PLATFORM_BOTTOM 0.42f
 #define PLATFORM_TOP 0.62f
 #define PLATFORM_TILE 7
+#define TILE_AI_SPAWN 12
+#define TILE_SUCCESS 13
 #define MAX_TILE_ID 15
+#define MAX_ENEMIES 32
+#define RANDOM_MAZE_CELLS_W 31
+#define RANDOM_MAZE_CELLS_H 31
+#define RANDOM_MAZE_W (RANDOM_MAZE_CELLS_W * 4 + 2)
+#define RANDOM_MAZE_H (RANDOM_MAZE_CELLS_H * 4 + 2)
 
 #define EDITOR_MAP_Y 8
 #define EDITOR_MAP_H 204
@@ -98,6 +105,17 @@ typedef struct {
 } Level;
 
 typedef struct {
+    bool active;
+    float x, y, z;
+    float start_x, start_y, start_z;
+    float angle;
+    float speed;
+    float roam_timer;
+    int hp;
+    int state;
+} Enemy;
+
+typedef struct {
     bool exists;
     char name[LEVEL_NAME_MAX + 1];
     uint16_t width;
@@ -108,6 +126,7 @@ typedef struct {
 
 typedef enum {
     MENU_ACTION_PLAY = 0,
+    MENU_ACTION_RANDOM,
     MENU_ACTION_EDIT,
     MENU_ACTION_RESIZE,
     MENU_ACTION_DUPLICATE,
@@ -122,6 +141,7 @@ extern Level g_level;
 extern Level g_preview_level;
 extern Level g_load_temp;
 extern Level g_resize_temp;
+extern Enemy g_enemies[MAX_ENEMIES];
 extern SlotInfo g_slots[SLOT_COUNT];
 extern bool g_in_menu;
 extern bool g_edit_mode;
@@ -157,12 +177,26 @@ extern float g_dof_start;
 extern float g_dof_strength;
 extern bool g_antialiasing;
 extern bool g_fast_render;
+extern bool g_debug_overlay;
 extern float g_bob_phase;
 extern float g_bob_amount;
 extern float g_camera_speed;
 extern int g_editor_view_x;
 extern int g_editor_view_y;
 extern int g_editor_zoom_tiles;
+extern int g_enemy_count;
+extern bool g_has_success;
+extern float g_success_x;
+extern float g_success_y;
+extern bool g_random_play;
+extern bool g_level_won;
+extern float g_play_start_x;
+extern float g_play_start_y;
+extern float g_play_start_z;
+extern float g_play_start_angle;
+extern uint32_t g_random_seed;
+extern float g_frame_dt;
+extern float g_fps_smooth;
 
 
 float clampf32(float v, float lo, float hi);
@@ -183,6 +217,7 @@ int tile_index(const Level *lv, int x, int y);
 uint8_t tile_at(const Level *lv, int x, int y);
 void set_tile(Level *lv, int x, int y, uint8_t v);
 bool tile_blocks_side(uint8_t tile, float z);
+bool tile_blocks_raycast(uint8_t tile);
 bool can_stand_at(const Level *lv, float x, float y, float z);
 float ground_height_at(const Level *lv, float x, float y, float z);
 void force_valid_spawn(Level *lv);
@@ -248,6 +283,9 @@ void render_world_menu(void);
 void enter_slot(bool edit_mode);
 void apply_resize_menu(void);
 void handle_world_menu_input(u32 kDown);
+void generate_random_maze(Level *lv, uint32_t seed);
+void spawn_entities_from_level(const Level *lv);
+void reset_runtime_entities(void);
 void update_physics_and_movement(float dt, u32 kDown, u32 kHeld);
 void editor_touch(u32 kDown, u32 kHeld);
 void handle_global_input(u32 kDown, u32 kHeld);
