@@ -545,6 +545,7 @@ static bool parse_app_settings_text(const char *txt) {
     float dof_strength = 0.55f;
     int aa = 0;
     int fast = 0;
+    int debug = 0;
 
     const char *p = txt;
     while (*p) {
@@ -566,6 +567,8 @@ static bool parse_app_settings_text(const char *txt) {
             /* handled */
         } else if (sscanf(p, "FAST %d", &fast) == 1) {
             /* handled */
+        } else if (sscanf(p, "DEBUG %d", &debug) == 1) {
+            /* handled */
         }
 
         const char *next = strchr(p, '\n');
@@ -582,6 +585,7 @@ static bool parse_app_settings_text(const char *txt) {
     g_dof_strength = dof_strength;
     g_antialiasing = aa != 0;
     g_fast_render = fast != 0;
+    g_debug_overlay = debug != 0;
     clamp_app_settings();
 
     if (!g_view_bob) {
@@ -623,9 +627,9 @@ bool save_app_settings(void) {
 
     clamp_app_settings();
 
-    char buf[256];
+    char buf[320];
     int n = snprintf(buf, sizeof(buf),
-                     "3DCASTERCFG1\nFOV %.1f\nDEPTH %.2f\nBOB %d\nSTEREO3D %d\nDOF %d\nDOFSTART %.1f\nDOFSTRENGTH %.2f\nAA %d\nFAST %d\n",
+                     "3DCASTERCFG1\nFOV %.1f\nDEPTH %.2f\nBOB %d\nSTEREO3D %d\nDOF %d\nDOFSTART %.1f\nDOFSTRENGTH %.2f\nAA %d\nFAST %d\nDEBUG %d\n",
                      g_fov_degrees,
                      g_level_depth,
                      g_view_bob ? 1 : 0,
@@ -634,7 +638,8 @@ bool save_app_settings(void) {
                      g_dof_start,
                      g_dof_strength,
                      g_antialiasing ? 1 : 0,
-                     g_fast_render ? 1 : 0);
+                     g_fast_render ? 1 : 0,
+                     g_debug_overlay ? 1 : 0);
     if (n <= 0 || n >= (int)sizeof(buf)) return false;
 
     bool primary_ok = fs_write_whole_file(SETTINGS_FS_PRIMARY, (const uint8_t*)buf, (size_t)n);
