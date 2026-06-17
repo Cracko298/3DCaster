@@ -44,7 +44,7 @@
 #define FOV_DEGREES 66.0f
 #define FOV_MIN_DEGREES 50.0f
 #define FOV_MAX_DEGREES 110.0f
-#define SETTINGS_ROW_COUNT 10
+#define SETTINGS_ROW_COUNT 11
 #define MOVE_SPEED 3.3f
 #define SPRINT_MULT 1.75f
 #define ROT_SPEED 2.35f
@@ -58,14 +58,49 @@
 #define PLATFORM_TOP 0.62f
 #define PLATFORM_TILE 7
 #define TILE_DOT 8
+#define TILE_PINK 9
+#define TILE_PURPLE 10
+#define TILE_NPC 11
 #define TILE_AI_SPAWN 12
 #define TILE_SUCCESS 13
 #define TILE_KEY 14
 #define TILE_DOOR 15
 #define MAX_TILE_ID 15
 #define MAX_ENEMIES 32
-#define MAX_COLLECTIBLES 128
+#define MAX_COLLECTIBLES 160
 #define MAX_DOORS 128
+#define MAX_NPCS 32
+#define MAX_WEAPONS 5
+#define NPC_TEXT_MAX 48
+#define ENEMY_TEXT_MAX 32
+#define ENEMY_TEXT_LINES 3
+#define SPRITE_BYTES 8
+#define TEXT_MODE_INTERACT 0
+#define TEXT_MODE_NEAR 1
+#define TEXT_MODE_ALWAYS 2
+#define EDIT_MODE_NONE 0
+#define EDIT_MODE_NPC 1
+#define EDIT_MODE_ENEMY 2
+#define EDIT_MODE_WEAPON 3
+#define EDIT_MODE_SPRITE 4
+#define SPRITE_TARGET_NPC 1
+#define SPRITE_TARGET_ENEMY 2
+#define SPRITE_TARGET_WEAPON 3
+#define SPRITE_TARGET_DEFAULT_NPC 4
+#define QUEST_NONE 0
+#define QUEST_COINS 1
+#define QUEST_KEY 2
+#define QUEST_NPC 3
+#define REWARD_DOT 0
+#define REWARD_KEY 1
+#define REWARD_PINK 2
+#define REWARD_PURPLE 3
+#define REWARD_WEAPON_BASE 16
+#define WEAPON_SWORD 0
+#define WEAPON_DAGGER 1
+#define WEAPON_KNIFE 2
+#define WEAPON_MACE 3
+#define WEAPON_MALLET 4
 #define KEY_PICKUP_RADIUS 0.48f
 #define DOOR_TRIGGER_RADIUS 1.35f
 #define DOOR_OPEN_TIME 0.72f
@@ -74,15 +109,15 @@
 #define RANDOM_MAZE_W (RANDOM_MAZE_CELLS_W * 4 + 2)
 #define RANDOM_MAZE_H (RANDOM_MAZE_CELLS_H * 4 + 2)
 
-#define EDITOR_MAP_Y 8
-#define EDITOR_MAP_H 204
+#define EDITOR_MAP_Y 4
+#define EDITOR_MAP_H 176
 #define PALETTE_Y 220
 #define PALETTE_X 4
 #define PALETTE_STEP 22
 #define PALETTE_W 18
 #define PALETTE_H 16
-#define EDITOR_CTRL_Y 212
-#define EDITOR_CTRL_H 28
+#define EDITOR_CTRL_Y 184
+#define EDITOR_CTRL_H 56
 #define EDITOR_ZOOM_MIN_TILES 8
 
 
@@ -120,7 +155,15 @@ typedef struct {
     float speed;
     float roam_timer;
     int hp;
+    int hp_max;
+    int attack;
     int state;
+    uint8_t text_count;
+    uint8_t text_index;
+    uint8_t color_id;
+    uint8_t sprite[SPRITE_BYTES];
+    float text_timer;
+    char text[ENEMY_TEXT_LINES][ENEMY_TEXT_MAX];
 } Enemy;
 
 typedef struct {
@@ -136,6 +179,42 @@ typedef struct {
     int x, y;
     float open_t;
 } Door;
+
+
+typedef struct {
+    bool active;
+    int x, y;
+    uint8_t color_id;
+    uint8_t text_mode;
+    uint8_t sprite[SPRITE_BYTES];
+    float talk_timer;
+    uint8_t quest_type;
+    uint16_t quest_target;
+    uint8_t reward_kind;
+    uint16_t reward_amount;
+    bool completed;
+    char text[NPC_TEXT_MAX];
+} NPC;
+
+typedef struct {
+    bool active;
+    int x, y;
+    uint8_t hp;
+    uint8_t attack;
+    uint8_t color_id;
+    uint8_t sprite[SPRITE_BYTES];
+    uint8_t text_count;
+    char text[ENEMY_TEXT_LINES][ENEMY_TEXT_MAX];
+} EnemyMeta;
+
+typedef struct {
+    char name[12];
+    uint8_t damage;
+    uint8_t range;
+    uint8_t cooldown;
+    uint8_t color_id;
+    uint8_t sprite[SPRITE_BYTES];
+} WeaponDef;
 
 typedef struct {
     bool exists;
@@ -154,6 +233,7 @@ typedef enum {
     MENU_ACTION_DUPLICATE,
     MENU_ACTION_RENAME,
     MENU_ACTION_DELETE,
+    MENU_ACTION_WEAPONS,
     MENU_ACTION_SETTINGS,
     MENU_ACTION_COUNT
 } MenuAction;
@@ -166,6 +246,9 @@ extern Level g_resize_temp;
 extern Enemy g_enemies[MAX_ENEMIES];
 extern Collectible g_collectibles[MAX_COLLECTIBLES];
 extern Door g_doors[MAX_DOORS];
+extern NPC g_npcs[MAX_NPCS];
+extern EnemyMeta g_enemy_metas[MAX_ENEMIES];
+extern WeaponDef g_weapons[MAX_WEAPONS];
 extern SlotInfo g_slots[SLOT_COUNT];
 extern bool g_in_menu;
 extern bool g_edit_mode;
@@ -212,8 +295,13 @@ extern int g_enemy_count;
 extern int g_collectible_count;
 extern int g_collectibles_left;
 extern int g_door_count;
+extern int g_npc_count;
+extern int g_enemy_meta_count;
 extern int g_player_keys;
 extern int g_player_score;
+extern bool g_player_weapons[MAX_WEAPONS];
+extern int g_current_weapon;
+extern float g_attack_cooldown;
 extern bool g_has_success;
 extern float g_success_x;
 extern float g_success_y;
@@ -226,6 +314,20 @@ extern float g_play_start_angle;
 extern uint32_t g_random_seed;
 extern float g_frame_dt;
 extern float g_fps_smooth;
+extern bool g_settings_dirty;
+extern bool g_loaded_npc_metadata;
+extern bool g_loaded_enemy_metadata;
+extern int g_entity_edit_mode;
+extern int g_entity_edit_cursor;
+extern int g_entity_edit_x;
+extern int g_entity_edit_y;
+extern int g_entity_edit_weapon;
+extern uint8_t g_default_npc_color;
+extern uint8_t g_default_npc_sprite[SPRITE_BYTES];
+extern int g_sprite_edit_target;
+extern int g_sprite_edit_cursor_x;
+extern int g_sprite_edit_cursor_y;
+extern int g_sprite_edit_return_mode;
 
 
 float clampf32(float v, float lo, float hi);
@@ -270,6 +372,7 @@ void make_slot_fs_path(char *out, size_t out_size, bool backup);
 void make_meta_fs_path_for(int slot, char *out, size_t out_size, bool backup);
 bool mem_put_u8(uint8_t *out, size_t cap, size_t *pos, uint8_t v);
 bool mem_put_u16_le(uint8_t *out, size_t cap, size_t *pos, uint16_t v);
+bool mem_put_u32_le(uint8_t *out, size_t cap, size_t *pos, uint32_t v);
 bool mem_put_raw_packet(uint8_t *out, size_t cap, size_t *pos, const uint8_t *tiles, int start, int count);
 bool encode_bwl2_memory(const Level *lv, uint8_t **out_data, size_t *out_size);
 bool fs_write_whole_file(const char *fs_path, const uint8_t *data, size_t size);
@@ -308,14 +411,29 @@ void editor_layout(const Level *lv, int *cell, int *ox, int *oy);
 Color map_tile_color(uint8_t tile);
 void draw_tile_palette(u8 *fb);
 void render_bottom_map(void);
+void render_entity_editor(u8 *fb);
 const char *menu_action_name(int action);
 void render_world_menu(void);
 void enter_slot(bool edit_mode);
 void apply_resize_menu(void);
 void handle_world_menu_input(u32 kDown);
+void open_weapon_editor(int weapon);
+void open_entity_editor_at(int x, int y);
+void close_entity_editor(void);
+void handle_entity_edit_input(u32 kDown);
 void generate_random_maze(Level *lv, uint32_t seed);
 void spawn_entities_from_level(const Level *lv);
 void reset_runtime_entities(void);
+NPC *npc_find_at(int x, int y);
+NPC *npc_ensure_at(int x, int y);
+EnemyMeta *enemy_meta_find_at(int x, int y);
+EnemyMeta *enemy_meta_ensure_at(int x, int y);
+void randomize_weapon_stats(uint32_t seed);
+const char *weapon_name(int weapon);
+void copy_default_sprite(uint8_t *dst, int kind);
+void open_sprite_editor(int target);
+void handle_sprite_edit_input(u32 kDown);
+void render_sprite_editor(u8 *fb);
 void update_physics_and_movement(float dt, u32 kDown, u32 kHeld);
 void editor_touch(u32 kDown, u32 kHeld);
 void handle_global_input(u32 kDown, u32 kHeld);
