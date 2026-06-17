@@ -27,6 +27,13 @@ bool mem_put_u16_le(uint8_t *out, size_t cap, size_t *pos, uint16_t v) {
            mem_put_u8(out, cap, pos, (uint8_t)(v >> 8));
 }
 
+bool mem_put_u32_le(uint8_t *out, size_t cap, size_t *pos, uint32_t v) {
+    return mem_put_u8(out, cap, pos, (uint8_t)(v & 0xFF)) &&
+           mem_put_u8(out, cap, pos, (uint8_t)((v >> 8) & 0xFF)) &&
+           mem_put_u8(out, cap, pos, (uint8_t)((v >> 16) & 0xFF)) &&
+           mem_put_u8(out, cap, pos, (uint8_t)((v >> 24) & 0xFF));
+}
+
 bool mem_put_raw_packet(uint8_t *out, size_t cap, size_t *pos, const uint8_t *tiles, int start, int count) {
     if (!mem_put_u8(out, cap, pos, (uint8_t)(count - 1))) return false;
 
@@ -45,7 +52,7 @@ bool encode_bwl2_memory(const Level *lv, uint8_t **out_data, size_t *out_size) {
     if (lv->width < 3 || lv->height < 3 || lv->width > MAX_MAP_W || lv->height > MAX_MAP_H) return false;
 
     int n = lv->width * lv->height;
-    size_t cap = (size_t)n * 2 + 64;
+    size_t cap = (size_t)n * 2 + 8192;
     uint8_t *out = (uint8_t*)malloc(cap);
     if (!out) return false;
 
@@ -54,13 +61,17 @@ bool encode_bwl2_memory(const Level *lv, uint8_t **out_data, size_t *out_size) {
 
     ok = ok && mem_put_u8(out, cap, &pos, 'B');
     ok = ok && mem_put_u8(out, cap, &pos, 'W');
-    ok = ok && mem_put_u8(out, cap, &pos, '2');
+    ok = ok && mem_put_u8(out, cap, &pos, '3');
     ok = ok && mem_put_u16_le(out, cap, &pos, lv->width);
     ok = ok && mem_put_u16_le(out, cap, &pos, lv->height);
     ok = ok && mem_put_u16_le(out, cap, &pos, qpos(lv->player_x));
     ok = ok && mem_put_u16_le(out, cap, &pos, qpos(lv->player_y));
     ok = ok && mem_put_u16_le(out, cap, &pos, qpos(lv->player_z));
     ok = ok && mem_put_u16_le(out, cap, &pos, qangle(lv->player_angle));
+
+    size_t tile_size_pos = pos;
+    ok = ok && mem_put_u32_le(out, cap, &pos, 0);
+    size_t tile_start = pos;
 
     int i = 0;
     while (ok && i < n) {
@@ -95,6 +106,77 @@ bool encode_bwl2_memory(const Level *lv, uint8_t **out_data, size_t *out_size) {
         if (raw_count <= 0) ok = false;
         else ok = ok && mem_put_raw_packet(out, cap, &pos, lv->tiles, raw_start, raw_count);
     }
+
+    uint32_t tile_size = (uint32_t)(pos - tile_start);
+    out[tile_size_pos + 0] = (uint8_t)(tile_size & 0xFF);
+    out[tile_size_pos + 1] = (uint8_t)((tile_size >> 8) & 0xFF);
+    out[tile_size_pos + 2] = (uint8_t)((tile_size >> 16) & 0xFF);
+    out[tile_size_pos + 3] = (uint8_t)((tile_size >> 24) & 0xFF);
+
+    /* NPC chunk */
+    ok = ok && mem_put_u8(out, cap, &pos, 'N') && mem_put_u8(out, cap, &pos, 'P') && mem_put_u8(out, cap, &pos, 'C') && mem_put_u8(out, cap, &pos, '3');
+    int npc_count = (lv == &g_level) ? g_npc_count : 0;
+    if (npc_count < 0) npc_count = 0;
+    if (npc_count > MAX_NPCS) npc_count = MAX_NPCS;
+    ok = ok && mem_put_u8(out, cap, &pos, (uint8_t)npc_count);
+    for (int ni = 0; ok && ni < npc_count; ni++) {
+        const NPC *npc = &g_npcs[ni];
+        ok = ok && mem_put_u16_le(out, cap, &pos, (uint16_t)npc->x);
+        ok = ok && mem_put_u16_le(out, cap, &pos, (uint16_t)npc->y);
+        ok = ok && mem_put_u8(out, cap, &pos, npc->color_id);
+        ok = ok && mem_put_u8(out, cap, &pos, npc->text_mode);
+        for (int si = 0; ok && si < SPRITE_BYTES; si++) ok = ok && mem_put_u8(out, cap, &pos, npc->sprite[si]);
+        ok = ok && mem_put_u8(out, cap, &pos, npc->quest_type);
+        ok = ok && mem_put_u16_le(out, cap, &pos, npc->quest_target);
+        ok = ok && mem_put_u8(out, cap, &pos, npc->reward_kind);
+        ok = ok && mem_put_u16_le(out, cap, &pos, npc->reward_amount);
+        ok = ok && mem_put_u8(out, cap, &pos, npc->completed ? 1 : 0);
+        int len = 0;
+        while (len < NPC_TEXT_MAX - 1 && npc->text[len]) len++;
+        ok = ok && mem_put_u8(out, cap, &pos, (uint8_t)len);
+        for (int ti = 0; ok && ti < len; ti++) ok = ok && mem_put_u8(out, cap, &pos, (uint8_t)npc->text[ti]);
+    }
+
+    /* Enemy metadata chunk with stats + text */
+    ok = ok && mem_put_u8(out, cap, &pos, 'E') && mem_put_u8(out, cap, &pos, 'N') && mem_put_u8(out, cap, &pos, 'M') && mem_put_u8(out, cap, &pos, '3');
+    int em_count = (lv == &g_level) ? g_enemy_meta_count : 0;
+    if (em_count < 0) em_count = 0;
+    if (em_count > MAX_ENEMIES) em_count = MAX_ENEMIES;
+    ok = ok && mem_put_u8(out, cap, &pos, (uint8_t)em_count);
+    for (int ei = 0; ok && ei < em_count; ei++) {
+        const EnemyMeta *m = &g_enemy_metas[ei];
+        ok = ok && mem_put_u16_le(out, cap, &pos, (uint16_t)m->x);
+        ok = ok && mem_put_u16_le(out, cap, &pos, (uint16_t)m->y);
+        ok = ok && mem_put_u8(out, cap, &pos, m->hp ? m->hp : 5);
+        ok = ok && mem_put_u8(out, cap, &pos, m->attack ? m->attack : 1);
+        ok = ok && mem_put_u8(out, cap, &pos, m->color_id);
+        for (int si = 0; ok && si < SPRITE_BYTES; si++) ok = ok && mem_put_u8(out, cap, &pos, m->sprite[si]);
+        uint8_t tc = m->text_count;
+        if (tc > ENEMY_TEXT_LINES) tc = ENEMY_TEXT_LINES;
+        ok = ok && mem_put_u8(out, cap, &pos, tc);
+        for (int li = 0; ok && li < tc; li++) {
+            int len = 0;
+            while (len < ENEMY_TEXT_MAX - 1 && m->text[li][len]) len++;
+            ok = ok && mem_put_u8(out, cap, &pos, (uint8_t)len);
+            for (int ti = 0; ok && ti < len; ti++) ok = ok && mem_put_u8(out, cap, &pos, (uint8_t)m->text[li][ti]);
+        }
+    }
+
+    /* Weapon stat/name chunk */
+    ok = ok && mem_put_u8(out, cap, &pos, 'W') && mem_put_u8(out, cap, &pos, 'E') && mem_put_u8(out, cap, &pos, 'P') && mem_put_u8(out, cap, &pos, '3');
+    ok = ok && mem_put_u8(out, cap, &pos, MAX_WEAPONS);
+    for (int wi = 0; ok && wi < MAX_WEAPONS; wi++) {
+        int len = 0;
+        while (len < (int)sizeof(g_weapons[wi].name) - 1 && g_weapons[wi].name[len]) len++;
+        ok = ok && mem_put_u8(out, cap, &pos, (uint8_t)len);
+        for (int ti = 0; ok && ti < len; ti++) ok = ok && mem_put_u8(out, cap, &pos, (uint8_t)g_weapons[wi].name[ti]);
+        ok = ok && mem_put_u8(out, cap, &pos, g_weapons[wi].damage);
+        ok = ok && mem_put_u8(out, cap, &pos, g_weapons[wi].range);
+        ok = ok && mem_put_u8(out, cap, &pos, g_weapons[wi].cooldown);
+        ok = ok && mem_put_u8(out, cap, &pos, g_weapons[wi].color_id);
+        for (int si = 0; ok && si < SPRITE_BYTES; si++) ok = ok && mem_put_u8(out, cap, &pos, g_weapons[wi].sprite[si]);
+    }
+    ok = ok && mem_put_u8(out, cap, &pos, 'E') && mem_put_u8(out, cap, &pos, 'N') && mem_put_u8(out, cap, &pos, 'D') && mem_put_u8(out, cap, &pos, '!');
 
     if (!ok) {
         free(out);
@@ -255,13 +337,247 @@ bool decode_bwl2_tiles(const uint8_t *data, size_t size, Level *lv) {
     return out == expected && i == size;
 }
 
+
+static void reset_level_metadata_defaults(void) {
+    memset(g_npcs, 0, sizeof(g_npcs));
+    memset(g_enemy_metas, 0, sizeof(g_enemy_metas));
+    g_npc_count = 0;
+    g_enemy_meta_count = 0;
+    g_loaded_npc_metadata = false;
+    g_loaded_enemy_metadata = false;
+}
+
+static void parse_bw3_chunks(const uint8_t *p, size_t size) {
+    reset_level_metadata_defaults();
+    size_t pos = 0;
+    while (pos + 4 <= size) {
+        char a = (char)p[pos + 0];
+        char b = (char)p[pos + 1];
+        char c = (char)p[pos + 2];
+        char d = (char)p[pos + 3];
+        pos += 4;
+        if (a == 'E' && b == 'N' && c == 'D' && d == '!') break;
+        if (a == 'N' && b == 'P' && c == 'C' && d == '3') {
+            if (pos >= size) break;
+            int count = p[pos++];
+            if (count > MAX_NPCS) count = MAX_NPCS;
+            for (int i = 0; i < count && pos + 22 <= size; i++) {
+                NPC *n = &g_npcs[g_npc_count++];
+                memset(n, 0, sizeof(*n));
+                n->active = true;
+                n->x = read_u16_le(p + pos); pos += 2;
+                n->y = read_u16_le(p + pos); pos += 2;
+                n->color_id = p[pos++];
+                n->text_mode = p[pos++];
+                for (int si = 0; si < SPRITE_BYTES && pos < size; si++) n->sprite[si] = p[pos++];
+                n->quest_type = p[pos++];
+                n->quest_target = read_u16_le(p + pos); pos += 2;
+                n->reward_kind = p[pos++];
+                n->reward_amount = read_u16_le(p + pos); pos += 2;
+                n->completed = p[pos++] != 0;
+                if (n->text_mode > TEXT_MODE_ALWAYS) n->text_mode = TEXT_MODE_NEAR;
+                if (pos >= size) break;
+                int len = p[pos++];
+                if (len >= NPC_TEXT_MAX) len = NPC_TEXT_MAX - 1;
+                if (pos + (size_t)len > size) len = (int)(size - pos);
+                memcpy(n->text, p + pos, len);
+                n->text[len] = '\0';
+                pos += len;
+                bool empty = true; for (int si = 0; si < SPRITE_BYTES; si++) if (n->sprite[si]) empty = false;
+                if (empty) copy_default_sprite(n->sprite, SPRITE_TARGET_NPC);
+            }
+            g_loaded_npc_metadata = true;
+        } else if (a == 'N' && b == 'P' && c == 'C' && d == 'S') {
+            if (pos >= size) break;
+            int count = p[pos++];
+            if (count > MAX_NPCS) count = MAX_NPCS;
+            for (int i = 0; i < count && pos + 12 <= size; i++) {
+                NPC *n = &g_npcs[g_npc_count++];
+                memset(n, 0, sizeof(*n));
+                n->active = true;
+                n->x = read_u16_le(p + pos); pos += 2;
+                n->y = read_u16_le(p + pos); pos += 2;
+                n->color_id = p[pos++];
+                n->quest_type = p[pos++];
+                n->quest_target = read_u16_le(p + pos); pos += 2;
+                n->reward_kind = p[pos++];
+                n->reward_amount = read_u16_le(p + pos); pos += 2;
+                n->completed = p[pos++] != 0;
+                if (pos >= size) break;
+                int len = p[pos++];
+                if (len >= NPC_TEXT_MAX) len = NPC_TEXT_MAX - 1;
+                if (pos + (size_t)len > size) len = (int)(size - pos);
+                memcpy(n->text, p + pos, len);
+                n->text[len] = '\0';
+                pos += len;
+                if (n->text_mode > TEXT_MODE_ALWAYS) n->text_mode = TEXT_MODE_NEAR;
+                bool empty = true; for (int si = 0; si < SPRITE_BYTES; si++) if (n->sprite[si]) empty = false;
+                if (empty) copy_default_sprite(n->sprite, SPRITE_TARGET_NPC);
+            }
+            g_loaded_npc_metadata = true;
+        } else if (a == 'E' && b == 'N' && c == 'M' && d == '3') {
+            if (pos >= size) break;
+            int count = p[pos++];
+            if (count > MAX_ENEMIES) count = MAX_ENEMIES;
+            for (int i = 0; i < count && pos + 16 <= size; i++) {
+                EnemyMeta *m = &g_enemy_metas[g_enemy_meta_count++];
+                memset(m, 0, sizeof(*m));
+                m->active = true;
+                m->x = read_u16_le(p + pos); pos += 2;
+                m->y = read_u16_le(p + pos); pos += 2;
+                m->hp = p[pos++];
+                m->attack = p[pos++];
+                m->color_id = p[pos++];
+                for (int si = 0; si < SPRITE_BYTES && pos < size; si++) m->sprite[si] = p[pos++];
+                if (m->hp == 0) m->hp = 5;
+                if (m->attack == 0) m->attack = 1;
+                bool empty = true; for (int si = 0; si < SPRITE_BYTES; si++) if (m->sprite[si]) empty = false;
+                if (empty) copy_default_sprite(m->sprite, SPRITE_TARGET_ENEMY);
+                m->text_count = p[pos++];
+                if (m->text_count > ENEMY_TEXT_LINES) m->text_count = ENEMY_TEXT_LINES;
+                for (int li = 0; li < m->text_count && pos < size; li++) {
+                    int len = p[pos++];
+                    if (len >= ENEMY_TEXT_MAX) len = ENEMY_TEXT_MAX - 1;
+                    if (pos + (size_t)len > size) len = (int)(size - pos);
+                    memcpy(m->text[li], p + pos, len);
+                    m->text[li][len] = '\0';
+                    pos += len;
+                }
+            }
+            g_loaded_enemy_metadata = true;
+        } else if (a == 'E' && b == 'N' && c == 'M' && d == '2') {
+            if (pos >= size) break;
+            int count = p[pos++];
+            if (count > MAX_ENEMIES) count = MAX_ENEMIES;
+            for (int i = 0; i < count && pos + 7 <= size; i++) {
+                EnemyMeta *m = &g_enemy_metas[g_enemy_meta_count++];
+                memset(m, 0, sizeof(*m));
+                m->active = true;
+                m->x = read_u16_le(p + pos); pos += 2;
+                m->y = read_u16_le(p + pos); pos += 2;
+                m->hp = p[pos++];
+                m->attack = p[pos++];
+                if (m->hp == 0) m->hp = 5;
+                if (m->attack == 0) m->attack = 1;
+                m->color_id = (uint8_t)((m->x + m->y) & 7);
+                copy_default_sprite(m->sprite, SPRITE_TARGET_ENEMY);
+                m->text_count = p[pos++];
+                if (m->text_count > ENEMY_TEXT_LINES) m->text_count = ENEMY_TEXT_LINES;
+                for (int li = 0; li < m->text_count && pos < size; li++) {
+                    int len = p[pos++];
+                    if (len >= ENEMY_TEXT_MAX) len = ENEMY_TEXT_MAX - 1;
+                    if (pos + (size_t)len > size) len = (int)(size - pos);
+                    memcpy(m->text[li], p + pos, len);
+                    m->text[li][len] = '\0';
+                    pos += len;
+                }
+            }
+            g_loaded_enemy_metadata = true;
+        } else if (a == 'E' && b == 'N' && c == 'M' && d == 'S') {
+            if (pos >= size) break;
+            int count = p[pos++];
+            if (count > MAX_ENEMIES) count = MAX_ENEMIES;
+            for (int i = 0; i < count && pos + 5 <= size; i++) {
+                EnemyMeta *m = &g_enemy_metas[g_enemy_meta_count++];
+                memset(m, 0, sizeof(*m));
+                m->active = true;
+                m->x = read_u16_le(p + pos); pos += 2;
+                m->y = read_u16_le(p + pos); pos += 2;
+                m->hp = (uint8_t)(5 + ((m->x + m->y) & 3));
+                m->attack = 1;
+                m->color_id = (uint8_t)((m->x + m->y) & 7);
+                copy_default_sprite(m->sprite, SPRITE_TARGET_ENEMY);
+                m->text_count = p[pos++];
+                if (m->text_count > ENEMY_TEXT_LINES) m->text_count = ENEMY_TEXT_LINES;
+                for (int li = 0; li < m->text_count && pos < size; li++) {
+                    int len = p[pos++];
+                    if (len >= ENEMY_TEXT_MAX) len = ENEMY_TEXT_MAX - 1;
+                    if (pos + (size_t)len > size) len = (int)(size - pos);
+                    memcpy(m->text[li], p + pos, len);
+                    m->text[li][len] = '\0';
+                    pos += len;
+                }
+            }
+            g_loaded_enemy_metadata = true;
+        } else if (a == 'W' && b == 'E' && c == 'P' && d == '3') {
+            if (pos >= size) break;
+            int count = p[pos++];
+            if (count > MAX_WEAPONS) count = MAX_WEAPONS;
+            for (int i = 0; i < count && pos < size; i++) {
+                int len = p[pos++];
+                if (len >= (int)sizeof(g_weapons[i].name)) len = (int)sizeof(g_weapons[i].name) - 1;
+                if (pos + (size_t)len > size) len = (int)(size - pos);
+                memcpy(g_weapons[i].name, p + pos, len);
+                g_weapons[i].name[len] = '\0';
+                pos += len;
+                if (pos + 12 > size) break;
+                g_weapons[i].damage = p[pos++];
+                g_weapons[i].range = p[pos++];
+                g_weapons[i].cooldown = p[pos++];
+                g_weapons[i].color_id = p[pos++];
+                for (int si = 0; si < SPRITE_BYTES && pos < size; si++) g_weapons[i].sprite[si] = p[pos++];
+                bool empty = true; for (int si = 0; si < SPRITE_BYTES; si++) if (g_weapons[i].sprite[si]) empty = false;
+                if (empty) copy_default_sprite(g_weapons[i].sprite, SPRITE_TARGET_WEAPON);
+            }
+        } else if (a == 'W' && b == 'E' && c == 'P' && d == '2') {
+            if (pos >= size) break;
+            int count = p[pos++];
+            if (count > MAX_WEAPONS) count = MAX_WEAPONS;
+            for (int i = 0; i < count && pos < size; i++) {
+                int len = p[pos++];
+                if (len >= (int)sizeof(g_weapons[i].name)) len = (int)sizeof(g_weapons[i].name) - 1;
+                if (pos + (size_t)len > size) len = (int)(size - pos);
+                memcpy(g_weapons[i].name, p + pos, len);
+                g_weapons[i].name[len] = '\0';
+                pos += len;
+                if (pos + 3 > size) break;
+                g_weapons[i].damage = p[pos++];
+                g_weapons[i].range = p[pos++];
+                g_weapons[i].cooldown = p[pos++];
+                g_weapons[i].color_id = (uint8_t)(i & 7);
+                copy_default_sprite(g_weapons[i].sprite, SPRITE_TARGET_WEAPON);
+            }
+        } else if (a == 'W' && b == 'E' && c == 'A' && d == 'P') {
+            if (pos >= size) break;
+            int count = p[pos++];
+            if (count > MAX_WEAPONS) count = MAX_WEAPONS;
+            for (int i = 0; i < count && pos + 3 <= size; i++) {
+                g_weapons[i].damage = p[pos++];
+                g_weapons[i].range = p[pos++];
+                g_weapons[i].cooldown = p[pos++];
+                g_weapons[i].color_id = (uint8_t)(i & 7);
+                copy_default_sprite(g_weapons[i].sprite, SPRITE_TARGET_WEAPON);
+            }
+        } else {
+            break;
+        }
+    }
+}
+
 bool parse_bwl_data(const uint8_t *data, size_t len, Level *lv) {
     if (!data || !lv || len < 15) return false;
 
     bool ok = false;
     Level *tmp = &g_load_temp;
 
-    if (len >= 15 && data[0] == 'B' && data[1] == 'W' && data[2] == '2') {
+    if (len >= 19 && data[0] == 'B' && data[1] == 'W' && data[2] == '3') {
+        uint16_t width = read_u16_le(data + 3);
+        uint16_t height = read_u16_le(data + 5);
+        uint32_t tile_size = read_u32_le(data + 15);
+        if (width >= 3 && height >= 3 && width <= MAX_MAP_W && height <= MAX_MAP_H && 19u + tile_size <= len) {
+            memset(tmp, 0, sizeof(*tmp));
+            tmp->width = width;
+            tmp->height = height;
+            tmp->player_x = uqpos(read_u16_le(data + 7));
+            tmp->player_y = uqpos(read_u16_le(data + 9));
+            tmp->player_z = uqpos(read_u16_le(data + 11));
+            tmp->player_vz = 0.0f;
+            tmp->player_angle = uqangle(read_u16_le(data + 13));
+            tmp->on_ground = false;
+            ok = decode_bwl2_tiles(data + 19, tile_size, tmp);
+            if (ok && lv == &g_level) parse_bw3_chunks(data + 19 + tile_size, len - 19 - tile_size);
+        }
+    } else if (len >= 15 && data[0] == 'B' && data[1] == 'W' && data[2] == '2') {
         uint16_t width = read_u16_le(data + 3);
         uint16_t height = read_u16_le(data + 5);
         if (width >= 3 && height >= 3 && width <= MAX_MAP_W && height <= MAX_MAP_H) {
@@ -297,6 +613,7 @@ bool parse_bwl_data(const uint8_t *data, size_t len, Level *lv) {
     }
 
     if (ok) {
+        if (lv == &g_level && !(len >= 19 && data[0] == 'B' && data[1] == 'W' && data[2] == '3')) reset_level_metadata_defaults();
         force_valid_spawn(tmp);
         *lv = *tmp;
     }
@@ -485,7 +802,7 @@ bool duplicate_slot(int src_slot, int dst_slot) {
     char name[LEVEL_NAME_MAX + 1];
     if (!load_slot_meta(src_slot, name, sizeof(name))) default_slot_name(src_slot, name, sizeof(name));
     char copy_name[LEVEL_NAME_MAX + 1];
-    snprintf(copy_name, sizeof(copy_name), "%s COPY", name);
+    snprintf(copy_name, sizeof(copy_name), "%.26s COPY", name);
     sanitize_level_name(copy_name);
 
     if (!save_bwl2_slot(tmp, dst_slot, copy_name, false)) {
@@ -533,6 +850,19 @@ static void clamp_app_settings(void) {
     g_dof_strength = clampf32(g_dof_strength, 0.10f, 1.00f);
 }
 
+
+static void parse_sprite_hex_line(const char *p, uint8_t *out) {
+    if (!p || !out) return;
+    const char *q = strchr(p, ' ');
+    if (!q) return;
+    q++;
+    for (int i = 0; i < SPRITE_BYTES; i++) {
+        unsigned int v = 0;
+        if (sscanf(q + i * 2, "%2x", &v) != 1) return;
+        out[i] = (uint8_t)(v & 0xFF);
+    }
+}
+
 static bool parse_app_settings_text(const char *txt) {
     if (!txt || strncmp(txt, "3DCASTERCFG1", 12) != 0) return false;
 
@@ -546,6 +876,7 @@ static bool parse_app_settings_text(const char *txt) {
     int aa = 0;
     int fast = 0;
     int debug = 0;
+    int defnpc = 0;
 
     const char *p = txt;
     while (*p) {
@@ -569,6 +900,10 @@ static bool parse_app_settings_text(const char *txt) {
             /* handled */
         } else if (sscanf(p, "DEBUG %d", &debug) == 1) {
             /* handled */
+        } else if (sscanf(p, "DEFAULTNPC %d", &defnpc) == 1) {
+            /* handled */
+        } else if (strncmp(p, "DEFAULTNPCSPRITE ", 17) == 0) {
+            parse_sprite_hex_line(p, g_default_npc_sprite);
         }
 
         const char *next = strchr(p, '\n');
@@ -586,6 +921,7 @@ static bool parse_app_settings_text(const char *txt) {
     g_antialiasing = aa != 0;
     g_fast_render = fast != 0;
     g_debug_overlay = debug != 0;
+    g_default_npc_color = (uint8_t)(defnpc & 7);
     clamp_app_settings();
 
     if (!g_view_bob) {
@@ -627,9 +963,12 @@ bool save_app_settings(void) {
 
     clamp_app_settings();
 
-    char buf[320];
+    char sprite_hex[SPRITE_BYTES * 2 + 1];
+    for (int i = 0; i < SPRITE_BYTES; i++) snprintf(sprite_hex + i * 2, 3, "%02X", g_default_npc_sprite[i]);
+
+    char buf[512];
     int n = snprintf(buf, sizeof(buf),
-                     "3DCASTERCFG1\nFOV %.1f\nDEPTH %.2f\nBOB %d\nSTEREO3D %d\nDOF %d\nDOFSTART %.1f\nDOFSTRENGTH %.2f\nAA %d\nFAST %d\nDEBUG %d\n",
+                     "3DCASTERCFG1\nFOV %.1f\nDEPTH %.2f\nBOB %d\nSTEREO3D %d\nDOF %d\nDOFSTART %.1f\nDOFSTRENGTH %.2f\nAA %d\nFAST %d\nDEBUG %d\nDEFAULTNPC %d\nDEFAULTNPCSPRITE %s\n",
                      g_fov_degrees,
                      g_level_depth,
                      g_view_bob ? 1 : 0,
@@ -639,7 +978,9 @@ bool save_app_settings(void) {
                      g_dof_strength,
                      g_antialiasing ? 1 : 0,
                      g_fast_render ? 1 : 0,
-                     g_debug_overlay ? 1 : 0);
+                     g_debug_overlay ? 1 : 0,
+                     g_default_npc_color & 7,
+                     sprite_hex);
     if (n <= 0 || n >= (int)sizeof(buf)) return false;
 
     bool primary_ok = fs_write_whole_file(SETTINGS_FS_PRIMARY, (const uint8_t*)buf, (size_t)n);
