@@ -102,6 +102,80 @@ static void draw_billboard_sprite(u8 *fb,
     }
 }
 
+static const uint8_t KEY_SPRITE_8X8[8] = {
+    0x1C, 0x22, 0x22, 0x1C, 0x08, 0x0E, 0x08, 0x0C
+};
+
+static const uint8_t DOT_SPRITE_8X8[8] = {
+    0x00, 0x18, 0x3C, 0x7E, 0x7E, 0x3C, 0x18, 0x00
+};
+
+static void draw_billboard_masked_sprite(u8 *fb,
+                                         float cam_x, float cam_y,
+                                         float dir_x, float dir_y,
+                                         float plane_x, float plane_y,
+                                         float center_y,
+                                         const float *zbuf,
+                                         float sprite_x, float sprite_y,
+                                         float height_scale,
+                                         const uint8_t *mask8,
+                                         Color base) {
+    float rx = sprite_x - cam_x;
+    float ry = sprite_y - cam_y;
+    float det = plane_x * dir_y - dir_x * plane_y;
+    if (fabsf(det) < 0.000001f) return;
+
+    float inv_det = 1.0f / det;
+    float transform_x = inv_det * (dir_y * rx - dir_x * ry);
+    float transform_y = inv_det * (-plane_y * rx + plane_x * ry);
+    if (transform_y <= 0.08f) return;
+
+    int screen_x = (int)((RENDER_W * 0.5f) * (1.0f + transform_x / transform_y));
+    int sprite_h = (int)fabsf((RENDER_H / transform_y) * height_scale * clampf32(g_level_depth, 0.50f, 2.00f));
+    if (sprite_h < 5) sprite_h = 5;
+    if (sprite_h > RENDER_H) sprite_h = RENDER_H;
+
+    int sprite_w = sprite_h;
+    int draw_y0 = (int)(center_y - (float)sprite_h * 0.40f);
+    int draw_y1 = draw_y0 + sprite_h;
+    int draw_x0 = screen_x - sprite_w / 2;
+    int draw_x1 = screen_x + sprite_w / 2;
+
+    if (draw_y0 < 0) draw_y0 = 0;
+    if (draw_y1 >= RENDER_H) draw_y1 = RENDER_H - 1;
+    if (draw_x0 < 0) draw_x0 = 0;
+    if (draw_x1 >= RENDER_W) draw_x1 = RENDER_W - 1;
+    if (draw_x1 <= draw_x0 || draw_y1 <= draw_y0) return;
+
+    float shade = 1.0f / (1.0f + transform_y * 0.08f);
+    Color c = apply_dof_fade(shade_color(base, shade), transform_y);
+    Color shine = blend_color(c, (Color){255, 255, 255}, 0.40f);
+
+    int w = draw_x1 - draw_x0 + 1;
+    int h = draw_y1 - draw_y0 + 1;
+    for (int sy = draw_y0; sy <= draw_y1; sy++) {
+        int v = ((sy - draw_y0) * 8) / h;
+        if (v < 0) v = 0;
+        if (v > 7) v = 7;
+
+        for (int sx = draw_x0; sx <= draw_x1; sx++) {
+            if (transform_y >= zbuf[sx]) continue;
+
+            int u = ((sx - draw_x0) * 8) / w;
+            if (u < 0) u = 0;
+            if (u > 7) u = 7;
+            if (!(mask8[v] & (uint8_t)(0x80u >> u))) continue;
+
+            Color out = (v < 3 && u < 5) ? shine : c;
+            int px0 = sx * PIXEL_SCALE;
+            int px1 = px0 + PIXEL_SCALE;
+            int py0 = sy * PIXEL_SCALE;
+            int py1 = py0 + PIXEL_SCALE;
+            fill_rect_raw(fb, TOP_W, TOP_H, px0, py0, px1, py1, out);
+        }
+    }
+}
+
 static void render_raycast_eye(const Level *lv, gfx3dSide_t side, float eye_offset) {
     u8 *fb = gfxGetFramebuffer(GFX_TOP, side, NULL, NULL);
     if (!fb) return;
@@ -211,6 +285,12 @@ static void render_raycast_eye(const Level *lv, gfx3dSide_t side, float eye_offs
         if (hit_tile == PLATFORM_TILE) {
             z0 = PLATFORM_BOTTOM;
             z1 = PLATFORM_TOP;
+        } else if (hit_tile == TILE_DOOR) {
+            float open = door_open_fraction_at(map_x, map_y);
+            float lower = open * 1.12f;
+            z0 = -lower;
+            z1 = 1.0f - lower;
+            if (z1 <= -0.05f) continue;
         }
         z0 *= depth;
         z1 *= depth;
@@ -223,10 +303,11 @@ static void render_raycast_eye(const Level *lv, gfx3dSide_t side, float eye_offs
         if (draw_end >= RENDER_H) draw_end = RENDER_H - 1;
         if (draw_end <= draw_start) continue;
 
-        Color base = WALL_COLORS[hit_tile & 7];
+        Color base = (hit_tile == TILE_DOOR) ? (Color){150, 100, 45} : WALL_COLORS[hit_tile & 7];
         float shade = 1.0f / (1.0f + perp * 0.12f);
         if (side_hit == 1) shade *= 0.72f;
         if (hit_tile == PLATFORM_TILE) shade *= 0.95f;
+        if (hit_tile == TILE_DOOR) shade *= 1.08f;
         Color c = apply_dof_fade(shade_color(base, shade), perp);
 
         int sx0 = x * PIXEL_SCALE;
@@ -251,6 +332,17 @@ static void render_raycast_eye(const Level *lv, gfx3dSide_t side, float eye_offs
     }
 
     if (!g_render_angle_override && !g_edit_mode) {
+        for (int ci = 0; ci < g_collectible_count; ci++) {
+            const Collectible *c = &g_collectibles[ci];
+            if (!c->active) continue;
+            if (c->kind == 0) {
+                draw_billboard_masked_sprite(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, zbuf,
+                                             c->fx, c->fy, 0.26f, DOT_SPRITE_8X8, (Color){245, 205, 55});
+                continue;
+            }
+            draw_billboard_masked_sprite(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, zbuf,
+                                         c->fx, c->fy, 0.42f, KEY_SPRITE_8X8, (Color){245, 205, 55});
+        }
         if (g_has_success) {
             draw_billboard_sprite(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, zbuf,
                                   g_success_x, g_success_y, 0.70f, (Color){70, 255, 100});
@@ -278,8 +370,14 @@ static void render_raycast_eye(const Level *lv, gfx3dSide_t side, float eye_offs
         fill_rect_raw(fb, TOP_W, TOP_H, 4, 4, TOP_W - 4, 26, (Color){5, 5, 5});
         draw_text3x5(fb, TOP_W, TOP_H, 8, 8, g_edit_mode ? "EDITOR" : (g_random_play ? "RANDOM" : "PLAY"), g_edit_mode ? (Color){120,240,120} : (Color){120,190,255}, 2);
         draw_text_number(fb, TOP_W, TOP_H, 82, 8, g_dirty ? "SLOT* " : "SLOT ", g_slot, (Color){240, 240, 240}, 2);
-        draw_text_number(fb, TOP_W, TOP_H, 160, 8, "TILE ", g_selected_tile, map_tile_color(g_selected_tile), 2);
-        draw_text3x5(fb, TOP_W, TOP_H, 246, 8, g_status, (Color){230, 230, 160}, 1);
+        int status_x = 246;
+        if (g_edit_mode) draw_text_number(fb, TOP_W, TOP_H, 160, 8, "TILE ", g_selected_tile, map_tile_color(g_selected_tile), 2);
+        else {
+            draw_text_number(fb, TOP_W, TOP_H, 160, 8, "KEY ", g_player_keys, (Color){245, 205, 55}, 2);
+            draw_text_number(fb, TOP_W, TOP_H, 218, 8, "SCR ", g_player_score, (Color){230, 230, 160}, 2);
+            status_x = 292;
+        }
+        draw_text3x5(fb, TOP_W, TOP_H, status_x, 8, g_status, (Color){230, 230, 160}, 1);
 
         if (g_debug_overlay && !g_render_angle_override) {
             char dbg[96];
@@ -331,8 +429,11 @@ Color map_tile_color(uint8_t tile) {
     tile &= MAX_TILE_ID;
     if (tile == 0) return (Color){28, 28, 28};
     if (tile == PLATFORM_TILE) return (Color){40, 115, 120};
+    if (tile == TILE_DOT) return (Color){245, 205, 55};
     if (tile == TILE_AI_SPAWN) return (Color){190, 65, 210};
     if (tile == TILE_SUCCESS) return (Color){65, 235, 95};
+    if (tile == TILE_KEY) return (Color){245, 205, 55};
+    if (tile == TILE_DOOR) return (Color){150, 100, 45};
     if (tile >= 8) return (Color){90, 90, 110};
     Color base = WALL_COLORS[tile & 7];
     return (Color){(uint8_t)(base.r / 2 + 55), (uint8_t)(base.g / 2 + 55), (uint8_t)(base.b / 2 + 55)};
@@ -340,7 +441,13 @@ Color map_tile_color(uint8_t tile) {
 
 static void draw_tile_label(u8 *fb, int x, int y, int t, Color c) {
     char label[2];
-    label[0] = (char)((t < 10) ? ('0' + t) : ('A' + (t - 10)));
+    if (t == PLATFORM_TILE) label[0] = 'P';
+    else if (t == TILE_DOT) label[0] = '.';
+    else if (t == TILE_AI_SPAWN) label[0] = 'A';
+    else if (t == TILE_SUCCESS) label[0] = 'S';
+    else if (t == TILE_KEY) label[0] = 'K';
+    else if (t == TILE_DOOR) label[0] = 'D';
+    else label[0] = (char)((t < 10) ? ('0' + t) : ('A' + (t - 10)));
     label[1] = '\0';
     draw_text3x5(fb, BOT_W, BOT_H, x, y, label, c, 1);
 }

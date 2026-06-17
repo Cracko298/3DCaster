@@ -7,6 +7,24 @@ static bool s_touch_look_active = false;
 static int s_touch_last_x = 0;
 static int s_touch_last_y = 0;
 
+static const char *tile_short_name(uint8_t tile) {
+    tile &= MAX_TILE_ID;
+    switch (tile) {
+        case 0: return "EMPTY";
+        case PLATFORM_TILE: return "PLATFORM";
+        case TILE_DOT: return "DOT";
+        case TILE_AI_SPAWN: return "AI";
+        case TILE_SUCCESS: return "SUCCESS";
+        case TILE_KEY: return "KEY";
+        case TILE_DOOR: return "DOOR";
+        default: break;
+    }
+
+    static char buf[12];
+    snprintf(buf, sizeof(buf), "TILE %d", tile);
+    return buf;
+}
+
 static void wrap_player_angle(Level *lv) {
     while (lv->player_angle < 0.0f) lv->player_angle += TWO_PI_F;
     while (lv->player_angle >= TWO_PI_F) lv->player_angle -= TWO_PI_F;
@@ -330,7 +348,14 @@ static uint32_t rng_next(uint32_t *state) {
 
 void reset_runtime_entities(void) {
     memset(g_enemies, 0, sizeof(g_enemies));
+    memset(g_collectibles, 0, sizeof(g_collectibles));
+    memset(g_doors, 0, sizeof(g_doors));
     g_enemy_count = 0;
+    g_collectible_count = 0;
+    g_collectibles_left = 0;
+    g_door_count = 0;
+    g_player_keys = 0;
+    g_player_score = 0;
     g_has_success = false;
     g_success_x = 0.0f;
     g_success_y = 0.0f;
@@ -360,6 +385,88 @@ void spawn_entities_from_level(const Level *lv) {
                 g_has_success = true;
                 g_success_x = (float)x + 0.5f;
                 g_success_y = (float)y + 0.5f;
+            } else if ((t == TILE_DOT || t == TILE_KEY) && g_collectible_count < MAX_COLLECTIBLES) {
+                Collectible *c = &g_collectibles[g_collectible_count++];
+                memset(c, 0, sizeof(*c));
+                c->active = true;
+                c->x = x;
+                c->y = y;
+                c->fx = (float)x + 0.5f;
+                c->fy = (float)y + 0.5f;
+                c->kind = (t == TILE_KEY) ? 1 : 0;
+                g_collectibles_left++;
+            } else if (t == TILE_DOOR && g_door_count < MAX_DOORS) {
+                Door *d = &g_doors[g_door_count++];
+                memset(d, 0, sizeof(*d));
+                d->active = true;
+                d->opening = false;
+                d->x = x;
+                d->y = y;
+                d->open_t = 0.0f;
+            }
+        }
+    }
+}
+
+static void update_collectibles_and_doors(Level *lv, float dt) {
+    if (!lv || g_level_won) return;
+
+    const float key_r2 = KEY_PICKUP_RADIUS * KEY_PICKUP_RADIUS;
+    for (int i = 0; i < g_collectible_count; i++) {
+        Collectible *c = &g_collectibles[i];
+        if (!c->active) continue;
+
+        float dx = lv->player_x - c->fx;
+        float dy = lv->player_y - c->fy;
+        float dz = lv->player_z - ground_height_at(lv, c->fx, c->fy, 0.0f);
+        if ((dx * dx + dy * dy) <= key_r2 && fabsf(dz) < 0.85f) {
+            c->active = false;
+            if (g_collectibles_left > 0) g_collectibles_left--;
+            if (c->kind == 1) {
+                g_player_keys++;
+                g_player_score += 10;
+                snprintf(g_status, sizeof(g_status), "KEY +1  KEYS %d", g_player_keys);
+            } else {
+                g_player_score++;
+                snprintf(g_status, sizeof(g_status), "DOT +1  SCORE %d", g_player_score);
+            }
+        }
+    }
+
+    const float door_r2 = DOOR_TRIGGER_RADIUS * DOOR_TRIGGER_RADIUS;
+    for (int i = 0; i < g_door_count; i++) {
+        Door *d = &g_doors[i];
+        if (!d->active) continue;
+
+        if (!d->opening) {
+            float cx = (float)d->x + 0.5f;
+            float cy = (float)d->y + 0.5f;
+            float dx = lv->player_x - cx;
+            float dy = lv->player_y - cy;
+
+            if ((dx * dx + dy * dy) <= door_r2) {
+                if (g_player_keys > 0) {
+                    g_player_keys--;
+                    d->opening = true;
+                    d->open_t = 0.01f;
+                    snprintf(g_status, sizeof(g_status), "DOOR OPENING  KEYS %d", g_player_keys);
+                } else {
+                    snprintf(g_status, sizeof(g_status), "NEED A KEY");
+                }
+            }
+        }
+
+        if (d->opening) {
+            d->open_t += dt / DOOR_OPEN_TIME;
+            if (d->open_t >= 1.0f) {
+                d->open_t = 1.0f;
+                d->active = false;
+                if (d->x >= 0 && d->y >= 0 && d->x < lv->width && d->y < lv->height) {
+                    if ((lv->tiles[d->y * lv->width + d->x] & MAX_TILE_ID) == TILE_DOOR) {
+                        lv->tiles[d->y * lv->width + d->x] = 0;
+                    }
+                }
+                snprintf(g_status, sizeof(g_status), "DOOR OPEN");
             }
         }
     }
@@ -901,6 +1008,7 @@ void update_physics_and_movement(float dt, u32 kDown, u32 kHeld) {
     float speed = 0.0f;
     apply_cpad_movement(lv, dt, kHeld, true, &speed);
     update_view_bob_from_speed(dt, speed, lv->on_ground);
+    update_collectibles_and_doors(lv, dt);
     update_enemies(lv, dt);
     check_success_tile(lv);
 }
@@ -992,7 +1100,7 @@ void editor_touch(u32 kDown, u32 kHeld) {
             if (tp.px >= x0 - 2 && tp.px <= x0 + PALETTE_W + 2 &&
                 tp.py >= y0 - 1 && tp.py <= y0 + 11) {
                 g_selected_tile = (uint8_t)t;
-                snprintf(g_status, sizeof(g_status), "TILE %d", g_selected_tile);
+                snprintf(g_status, sizeof(g_status), "%s", tile_short_name(g_selected_tile));
                 return;
             }
         }
@@ -1079,11 +1187,11 @@ void handle_editor_input(float dt, u32 kDown, u32 kHeld) {
 
     if (kDown & KEY_DLEFT) {
         g_selected_tile = (uint8_t)((g_selected_tile + MAX_TILE_ID) % (MAX_TILE_ID + 1));
-        snprintf(g_status, sizeof(g_status), "TILE %d", g_selected_tile);
+        snprintf(g_status, sizeof(g_status), "%s", tile_short_name(g_selected_tile));
     }
     if (kDown & KEY_DRIGHT) {
         g_selected_tile = (uint8_t)((g_selected_tile + 1) % (MAX_TILE_ID + 1));
-        snprintf(g_status, sizeof(g_status), "TILE %d", g_selected_tile);
+        snprintf(g_status, sizeof(g_status), "%s", tile_short_name(g_selected_tile));
     }
 
     update_editor_player(dt, kHeld);

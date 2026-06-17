@@ -100,13 +100,24 @@ void set_tile(Level *lv, int x, int y, uint8_t v) {
 bool tile_blocks_side(uint8_t tile, float z) {
     if (tile >= 1 && tile <= 6) return true;
     if (tile == PLATFORM_TILE) return z < (PLATFORM_TOP - STEP_HEIGHT);
+    if (tile == TILE_DOOR) return true;
     return false;
 }
 
 bool tile_blocks_raycast(uint8_t tile) {
     if (tile >= 1 && tile <= 6) return true;
     if (tile == PLATFORM_TILE) return true;
+    if (tile == TILE_DOOR) return true;
     return false;
+}
+
+float door_open_fraction_at(int x, int y) {
+    for (int i = 0; i < g_door_count; i++) {
+        const Door *d = &g_doors[i];
+        if (!d->active) continue;
+        if (d->x == x && d->y == y) return clampf32(d->open_t, 0.0f, 1.0f);
+    }
+    return 0.0f;
 }
 
 bool can_stand_at(const Level *lv, float x, float y, float z) {
