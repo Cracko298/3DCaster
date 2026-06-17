@@ -1,5 +1,6 @@
 # 3DCaster
-- A "simple" Ray-Caster for Nintendo 3DS with Saving/Loading of user-made levels.
+- A "simple" Ray-Caster for Nintendo 3DS that turned into something I genuinely hate maintaning.
+- Make your own Dungeon Crawlers with weapons, treasure, enemies, and missions/story. Or a maze- (which is far less cool, but you do you).
 <img width="400" height="240" alt="2026-06-04_11-07-42 163_top" src="https://github.com/user-attachments/assets/56979131-0cda-411d-9b27-3078d2036d6e" />
 <img width="400" height="240" alt="2026-06-04_11-06-28 597_top" src="https://github.com/user-attachments/assets/b44746aa-257f-43f8-84f0-ad2287a3096d" />
 <img width="400" height="240" alt="2026-06-02_22-58-06 336_top" src="https://github.com/user-attachments/assets/5c323b55-99ea-4a59-991e-b2ae3006e2f5" />
