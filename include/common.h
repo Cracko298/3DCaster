@@ -57,10 +57,18 @@
 #define PLATFORM_BOTTOM 0.42f
 #define PLATFORM_TOP 0.62f
 #define PLATFORM_TILE 7
+#define TILE_DOT 8
 #define TILE_AI_SPAWN 12
 #define TILE_SUCCESS 13
+#define TILE_KEY 14
+#define TILE_DOOR 15
 #define MAX_TILE_ID 15
 #define MAX_ENEMIES 32
+#define MAX_COLLECTIBLES 128
+#define MAX_DOORS 128
+#define KEY_PICKUP_RADIUS 0.48f
+#define DOOR_TRIGGER_RADIUS 1.35f
+#define DOOR_OPEN_TIME 0.72f
 #define RANDOM_MAZE_CELLS_W 31
 #define RANDOM_MAZE_CELLS_H 31
 #define RANDOM_MAZE_W (RANDOM_MAZE_CELLS_W * 4 + 2)
@@ -116,6 +124,20 @@ typedef struct {
 } Enemy;
 
 typedef struct {
+    bool active;
+    int x, y;
+    float fx, fy;
+    int kind;
+} Collectible;
+
+typedef struct {
+    bool active;
+    bool opening;
+    int x, y;
+    float open_t;
+} Door;
+
+typedef struct {
     bool exists;
     char name[LEVEL_NAME_MAX + 1];
     uint16_t width;
@@ -142,6 +164,8 @@ extern Level g_preview_level;
 extern Level g_load_temp;
 extern Level g_resize_temp;
 extern Enemy g_enemies[MAX_ENEMIES];
+extern Collectible g_collectibles[MAX_COLLECTIBLES];
+extern Door g_doors[MAX_DOORS];
 extern SlotInfo g_slots[SLOT_COUNT];
 extern bool g_in_menu;
 extern bool g_edit_mode;
@@ -185,6 +209,11 @@ extern int g_editor_view_x;
 extern int g_editor_view_y;
 extern int g_editor_zoom_tiles;
 extern int g_enemy_count;
+extern int g_collectible_count;
+extern int g_collectibles_left;
+extern int g_door_count;
+extern int g_player_keys;
+extern int g_player_score;
 extern bool g_has_success;
 extern float g_success_x;
 extern float g_success_y;
@@ -218,6 +247,7 @@ uint8_t tile_at(const Level *lv, int x, int y);
 void set_tile(Level *lv, int x, int y, uint8_t v);
 bool tile_blocks_side(uint8_t tile, float z);
 bool tile_blocks_raycast(uint8_t tile);
+float door_open_fraction_at(int x, int y);
 bool can_stand_at(const Level *lv, float x, float y, float z);
 float ground_height_at(const Level *lv, float x, float y, float z);
 void force_valid_spawn(Level *lv);
