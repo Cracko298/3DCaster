@@ -277,33 +277,3 @@ Current door rendering includes panel/frame detail so doors look different from 
 | Enemy HP | Partially | Exists, but auto-generated. |
 | Weapon damage | Partially | Exists, randomized and saved. |
 | Exact quest target | Partially | Save format supports it, editor UI does not yet expose it cleanly. |
-
-## Recommended Next Improvement
-
-The cleanest next improvement would be a dedicated **Entity Edit Screen**.
-
-For NPCs, it could expose:
-
-```text
-NPC text
-NPC color
-Quest type
-Quest target
-Reward type
-Reward amount
-Reward weapon/item
-```
-
-For enemies, it could expose:
-
-```text
-Enemy HP
-Enemy damage
-Enemy behavior
-Enemy color/type
-Text line 1
-Text line 2
-Text line 3
-```
-
-This would be much easier to use than many button-combo shortcuts.
