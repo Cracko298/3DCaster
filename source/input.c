@@ -12,7 +12,10 @@ static const char *tile_short_name(uint8_t tile) {
     switch (tile) {
         case 0: return "EMPTY";
         case PLATFORM_TILE: return "PLATFORM";
-        case TILE_DOT: return "DOT";
+        case TILE_DOT: return "DOT 1";
+        case TILE_PINK: return "PINK 5";
+        case TILE_PURPLE: return "PURPLE 10";
+        case TILE_NPC: return "NPC";
         case TILE_AI_SPAWN: return "AI";
         case TILE_SUCCESS: return "SUCCESS";
         case TILE_KEY: return "KEY";
@@ -337,6 +340,8 @@ static void update_view_bob_from_speed(float dt, float speed, bool on_ground) {
 }
 
 
+static bool ai_line_of_sight(const Level *lv, float x0, float y0, float x1, float y1);
+
 static uint32_t rng_next(uint32_t *state) {
     uint32_t x = *state ? *state : 0xA341316Cu;
     x ^= x << 13;
@@ -346,16 +351,811 @@ static uint32_t rng_next(uint32_t *state) {
     return *state;
 }
 
+const char *weapon_name(int weapon) {
+    if (weapon < 0 || weapon >= MAX_WEAPONS) return "NONE";
+    return g_weapons[weapon].name;
+}
+
+void randomize_weapon_stats(uint32_t seed) {
+    uint32_t st = seed ? seed : 0x51C0FFEEu;
+    const char *names[MAX_WEAPONS] = {"SWORD", "DAGGER", "KNIFE", "MACE", "MALLET"};
+    const uint8_t base_damage[MAX_WEAPONS] = {4, 2, 2, 6, 8};
+    const uint8_t base_cool[MAX_WEAPONS] = {22, 10, 8, 32, 42};
+    for (int i = 0; i < MAX_WEAPONS; i++) {
+        snprintf(g_weapons[i].name, sizeof(g_weapons[i].name), "%s", names[i]);
+        uint32_t r = rng_next(&st);
+        int delta = (int)(r % 5u) - 2;
+        int dmg = (int)base_damage[i] + delta;
+        if (dmg < 1) dmg = 1;
+        if (dmg > 15) dmg = 15;
+        g_weapons[i].damage = (uint8_t)dmg;
+        g_weapons[i].range = (uint8_t)(1 + (rng_next(&st) % 2u));
+        int cd = (int)base_cool[i] + (int)(rng_next(&st) % 9u) - 4;
+        if (cd < 5) cd = 5;
+        if (cd > 60) cd = 60;
+        g_weapons[i].cooldown = (uint8_t)cd;
+        g_weapons[i].color_id = (uint8_t)(i & 7);
+        copy_default_sprite(g_weapons[i].sprite, SPRITE_TARGET_WEAPON);
+    }
+}
+
+static const uint8_t DEFAULT_NPC_SPRITE[SPRITE_BYTES]    = {0x3C,0x7E,0xDB,0xFF,0x7E,0x3C,0x24,0x66};
+static const uint8_t DEFAULT_ENEMY_SPRITE[SPRITE_BYTES]  = {0x18,0x3C,0x7E,0xDB,0xFF,0x7E,0x66,0xC3};
+static const uint8_t DEFAULT_WEAPON_SPRITE[SPRITE_BYTES] = {0x10,0x38,0x10,0x10,0x10,0x54,0x38,0x10};
+
+static bool sprite_is_empty(const uint8_t *sp) {
+    if (!sp) return true;
+    for (int i = 0; i < SPRITE_BYTES; i++) if (sp[i]) return false;
+    return true;
+}
+
+void copy_default_sprite(uint8_t *dst, int kind) {
+    if (!dst) return;
+    const uint8_t *src = DEFAULT_NPC_SPRITE;
+    if (kind == SPRITE_TARGET_ENEMY) src = DEFAULT_ENEMY_SPRITE;
+    else if (kind == SPRITE_TARGET_WEAPON) src = DEFAULT_WEAPON_SPRITE;
+    else if (kind == SPRITE_TARGET_DEFAULT_NPC) src = DEFAULT_NPC_SPRITE;
+    memcpy(dst, src, SPRITE_BYTES);
+}
+
+static void ensure_sprite_or_default(uint8_t *dst, int kind) {
+    if (sprite_is_empty(dst)) copy_default_sprite(dst, kind);
+}
+
+static uint8_t *sprite_edit_pixels(void) {
+    if (g_sprite_edit_target == SPRITE_TARGET_NPC) {
+        NPC *n = npc_find_at(g_entity_edit_x, g_entity_edit_y);
+        return n ? n->sprite : NULL;
+    }
+    if (g_sprite_edit_target == SPRITE_TARGET_ENEMY) {
+        EnemyMeta *m = enemy_meta_find_at(g_entity_edit_x, g_entity_edit_y);
+        return m ? m->sprite : NULL;
+    }
+    if (g_sprite_edit_target == SPRITE_TARGET_WEAPON) {
+        int wi = clampi32(g_entity_edit_weapon, 0, MAX_WEAPONS - 1);
+        return g_weapons[wi].sprite;
+    }
+    if (g_sprite_edit_target == SPRITE_TARGET_DEFAULT_NPC) return g_default_npc_sprite;
+    return NULL;
+}
+
+static uint8_t *sprite_edit_color_ptr(void) {
+    if (g_sprite_edit_target == SPRITE_TARGET_NPC) {
+        NPC *n = npc_find_at(g_entity_edit_x, g_entity_edit_y);
+        return n ? &n->color_id : NULL;
+    }
+    if (g_sprite_edit_target == SPRITE_TARGET_ENEMY) {
+        EnemyMeta *m = enemy_meta_find_at(g_entity_edit_x, g_entity_edit_y);
+        return m ? &m->color_id : NULL;
+    }
+    if (g_sprite_edit_target == SPRITE_TARGET_WEAPON) {
+        int wi = clampi32(g_entity_edit_weapon, 0, MAX_WEAPONS - 1);
+        return &g_weapons[wi].color_id;
+    }
+    if (g_sprite_edit_target == SPRITE_TARGET_DEFAULT_NPC) return &g_default_npc_color;
+    return NULL;
+}
+
+void open_sprite_editor(int target) {
+    g_sprite_edit_return_mode = g_entity_edit_mode;
+    g_sprite_edit_target = target;
+    g_entity_edit_mode = EDIT_MODE_SPRITE;
+    g_sprite_edit_cursor_x = 0;
+    g_sprite_edit_cursor_y = 0;
+    uint8_t *sp = sprite_edit_pixels();
+    if (sp) ensure_sprite_or_default(sp, target == SPRITE_TARGET_DEFAULT_NPC ? SPRITE_TARGET_NPC : target);
+    snprintf(g_status, sizeof(g_status), "SPRITE EDIT");
+}
+
+void handle_sprite_edit_input(u32 kDown) {
+    uint8_t *sp = sprite_edit_pixels();
+    uint8_t *color = sprite_edit_color_ptr();
+    if (!sp) { g_entity_edit_mode = g_sprite_edit_return_mode; return; }
+
+    if (kDown & KEY_B) {
+        g_entity_edit_mode = g_sprite_edit_return_mode;
+        g_sprite_edit_target = 0;
+        snprintf(g_status, sizeof(g_status), "SPRITE SAVED");
+        return;
+    }
+    if (kDown & KEY_DLEFT)  g_sprite_edit_cursor_x = clampi32(g_sprite_edit_cursor_x - 1, 0, 7);
+    if (kDown & KEY_DRIGHT) g_sprite_edit_cursor_x = clampi32(g_sprite_edit_cursor_x + 1, 0, 7);
+    if (kDown & KEY_DUP)    g_sprite_edit_cursor_y = clampi32(g_sprite_edit_cursor_y - 1, 0, 7);
+    if (kDown & KEY_DDOWN)  g_sprite_edit_cursor_y = clampi32(g_sprite_edit_cursor_y + 1, 0, 7);
+
+    if (kDown & KEY_A) {
+        uint8_t bit = (uint8_t)(1u << (7 - g_sprite_edit_cursor_x));
+        sp[g_sprite_edit_cursor_y] ^= bit;
+        if (g_sprite_edit_target == SPRITE_TARGET_DEFAULT_NPC) g_settings_dirty = true;
+        else g_dirty = true;
+    }
+    if (kDown & KEY_X) {
+        memset(sp, 0, SPRITE_BYTES);
+        if (g_sprite_edit_target == SPRITE_TARGET_DEFAULT_NPC) g_settings_dirty = true;
+        else g_dirty = true;
+        snprintf(g_status, sizeof(g_status), "SPRITE CLEARED");
+    }
+    if (kDown & KEY_Y) {
+        int kind = g_sprite_edit_target;
+        if (kind == SPRITE_TARGET_DEFAULT_NPC) kind = SPRITE_TARGET_NPC;
+        copy_default_sprite(sp, kind);
+        if (g_sprite_edit_target == SPRITE_TARGET_DEFAULT_NPC) g_settings_dirty = true;
+        else g_dirty = true;
+        snprintf(g_status, sizeof(g_status), "SPRITE PRESET");
+    }
+    if (color && (kDown & (KEY_L | KEY_R))) {
+        int d = (kDown & KEY_L) ? -1 : 1;
+        *color = (uint8_t)((*color + (d < 0 ? 7 : 1)) & 7);
+        if (g_sprite_edit_target == SPRITE_TARGET_DEFAULT_NPC) g_settings_dirty = true;
+        else g_dirty = true;
+        snprintf(g_status, sizeof(g_status), "COLOR %d", *color & 7);
+    }
+}
+
+
+NPC *npc_find_at(int x, int y) {
+    for (int i = 0; i < g_npc_count; i++) {
+        if (g_npcs[i].active && g_npcs[i].x == x && g_npcs[i].y == y) return &g_npcs[i];
+    }
+    return NULL;
+}
+
+NPC *npc_ensure_at(int x, int y) {
+    NPC *n = npc_find_at(x, y);
+    if (n) return n;
+    if (g_npc_count >= MAX_NPCS) return NULL;
+    n = &g_npcs[g_npc_count++];
+    memset(n, 0, sizeof(*n));
+    n->active = true;
+    n->x = x;
+    n->y = y;
+    n->color_id = g_default_npc_color & 7;
+    n->text_mode = TEXT_MODE_NEAR;
+    memcpy(n->sprite, g_default_npc_sprite, SPRITE_BYTES);
+    ensure_sprite_or_default(n->sprite, SPRITE_TARGET_NPC);
+    n->talk_timer = 0.0f;
+    n->quest_type = QUEST_COINS;
+    n->quest_target = (uint16_t)(5 + ((x + y) % 6));
+    n->reward_kind = (uint8_t)(REWARD_WEAPON_BASE + ((x + y) % MAX_WEAPONS));
+    n->reward_amount = 1;
+    snprintf(n->text, sizeof(n->text), "HELP ME AND ILL REWARD YOU");
+    return n;
+}
+
+EnemyMeta *enemy_meta_find_at(int x, int y) {
+    for (int i = 0; i < g_enemy_meta_count; i++) {
+        if (g_enemy_metas[i].active && g_enemy_metas[i].x == x && g_enemy_metas[i].y == y) return &g_enemy_metas[i];
+    }
+    return NULL;
+}
+
+EnemyMeta *enemy_meta_ensure_at(int x, int y) {
+    EnemyMeta *m = enemy_meta_find_at(x, y);
+    if (m) return m;
+    if (g_enemy_meta_count >= MAX_ENEMIES) return NULL;
+    m = &g_enemy_metas[g_enemy_meta_count++];
+    memset(m, 0, sizeof(*m));
+    m->active = true;
+    m->x = x;
+    m->y = y;
+    m->hp = (uint8_t)(5 + ((x + y) & 3));
+    m->attack = 1;
+    m->color_id = (uint8_t)((x + y) & 7);
+    copy_default_sprite(m->sprite, SPRITE_TARGET_ENEMY);
+    m->text_count = 3;
+    snprintf(m->text[0], sizeof(m->text[0]), "HEY");
+    snprintf(m->text[1], sizeof(m->text[1]), "OUCH");
+    snprintf(m->text[2], sizeof(m->text[2]), "GET BACK HERE");
+    return m;
+}
+
+static const char *reward_kind_name(int reward_kind) {
+    static char buf[20];
+    if (reward_kind == REWARD_DOT) return "DOT";
+    if (reward_kind == REWARD_KEY) return "KEY";
+    if (reward_kind == REWARD_PINK) return "PINK";
+    if (reward_kind == REWARD_PURPLE) return "PURPLE";
+    if (reward_kind >= REWARD_WEAPON_BASE && reward_kind < REWARD_WEAPON_BASE + MAX_WEAPONS) {
+        snprintf(buf, sizeof(buf), "%s", weapon_name(reward_kind - REWARD_WEAPON_BASE));
+        return buf;
+    }
+    return "ITEM";
+}
+
+static void reward_to_code(const NPC *n, char *out, size_t out_size) {
+    if (!out || out_size == 0) return;
+    int amount = n ? (int)n->reward_amount : 1;
+    if (amount < 1) amount = 1;
+    int k = n ? (int)n->reward_kind : REWARD_DOT;
+    if (k == REWARD_DOT) snprintf(out, out_size, "D%d", amount);
+    else if (k == REWARD_KEY) snprintf(out, out_size, "K%d", amount);
+    else if (k == REWARD_PINK) snprintf(out, out_size, "P%d", amount);
+    else if (k == REWARD_PURPLE) snprintf(out, out_size, "U%d", amount);
+    else if (k >= REWARD_WEAPON_BASE && k < REWARD_WEAPON_BASE + MAX_WEAPONS) snprintf(out, out_size, "W%d", k - REWARD_WEAPON_BASE);
+    else snprintf(out, out_size, "D1");
+}
+
+static bool parse_reward_code(const char *code, uint8_t *kind, uint16_t *amount) {
+    if (!code || !kind || !amount) return false;
+    while (*code == ' ') code++;
+    char c0 = *code;
+    if (c0 >= 'a' && c0 <= 'z') c0 = (char)(c0 - 32);
+
+    int n = 0;
+    for (const char *p = code; *p; p++) {
+        if (*p >= '0' && *p <= '9') n = n * 10 + (*p - '0');
+    }
+    if (n < 1) n = 1;
+    if (n > 99) n = 99;
+
+    if (c0 == 'D' || c0 == 'C') { *kind = REWARD_DOT; *amount = (uint16_t)n; return true; }
+    if (c0 == 'K') { *kind = REWARD_KEY; *amount = (uint16_t)n; return true; }
+    if (c0 == 'P') { *kind = REWARD_PINK; *amount = (uint16_t)n; return true; }
+    if (c0 == 'U') { *kind = REWARD_PURPLE; *amount = (uint16_t)n; return true; }
+    if (c0 == 'W' || c0 == 'S' || c0 == 'M') {
+        int wi = 0;
+        if (strstr(code, "DAG") || strstr(code, "dag")) wi = WEAPON_DAGGER;
+        else if (strstr(code, "KNI") || strstr(code, "kni")) wi = WEAPON_KNIFE;
+        else if (strstr(code, "MAC") || strstr(code, "mac")) wi = WEAPON_MACE;
+        else if (strstr(code, "MAL") || strstr(code, "mal")) wi = WEAPON_MALLET;
+        else if (strstr(code, "SWORD") || strstr(code, "sword")) wi = WEAPON_SWORD;
+        else {
+            wi = n;
+            if (wi < 0) wi = 0;
+            if (wi >= MAX_WEAPONS) wi = MAX_WEAPONS - 1;
+        }
+        *kind = (uint8_t)(REWARD_WEAPON_BASE + wi);
+        *amount = 1;
+        return true;
+    }
+    return false;
+}
+
+static void edit_npc_text_and_reward(NPC *n) {
+    if (!n) return;
+    char text[NPC_TEXT_MAX];
+    snprintf(text, sizeof(text), "%s", n->text[0] ? n->text : "HELLO");
+    SwkbdState swkbd;
+    swkbdInit(&swkbd, SWKBD_TYPE_NORMAL, 2, NPC_TEXT_MAX - 1);
+    swkbdSetHintText(&swkbd, "NPC text above head");
+    swkbdSetInitialText(&swkbd, text);
+    SwkbdButton button = swkbdInputText(&swkbd, text, sizeof(text));
+    if (button != SWKBD_BUTTON_NONE) {
+        snprintf(n->text, sizeof(n->text), "%s", text);
+    }
+
+    char code[24];
+    reward_to_code(n, code, sizeof(code));
+    swkbdInit(&swkbd, SWKBD_TYPE_NORMAL, 2, sizeof(code) - 1);
+    swkbdSetHintText(&swkbd, "Reward D3 K1 P2 U1 W0-W4");
+    swkbdSetInitialText(&swkbd, code);
+    button = swkbdInputText(&swkbd, code, sizeof(code));
+    if (button != SWKBD_BUTTON_NONE) {
+        uint8_t kind;
+        uint16_t amount;
+        if (parse_reward_code(code, &kind, &amount)) {
+            n->reward_kind = kind;
+            n->reward_amount = amount;
+        }
+    }
+    g_dirty = true;
+    snprintf(g_status, sizeof(g_status), "NPC %s X%d", reward_kind_name(n->reward_kind), n->reward_amount);
+}
+
+static void split_enemy_text(EnemyMeta *m, const char *src) {
+    if (!m || !src) return;
+    for (int i = 0; i < ENEMY_TEXT_LINES; i++) m->text[i][0] = '\0';
+    m->text_count = 0;
+    int line = 0;
+    int pos = 0;
+    for (const char *p = src; *p && line < ENEMY_TEXT_LINES; p++) {
+        if (*p == '|') {
+            m->text[line][pos] = '\0';
+            if (pos > 0) line++;
+            pos = 0;
+            continue;
+        }
+        if (pos < ENEMY_TEXT_MAX - 1) m->text[line][pos++] = *p;
+    }
+    if (line < ENEMY_TEXT_LINES) {
+        m->text[line][pos] = '\0';
+        if (pos > 0) line++;
+    }
+    m->text_count = (uint8_t)line;
+    if (m->text_count == 0) {
+        m->text_count = 1;
+        snprintf(m->text[0], sizeof(m->text[0]), "GRR");
+    }
+}
+
+static void edit_enemy_text_meta(EnemyMeta *m) {
+    if (!m) return;
+    char joined[ENEMY_TEXT_LINES * ENEMY_TEXT_MAX];
+    joined[0] = '\0';
+    for (int i = 0; i < m->text_count && i < ENEMY_TEXT_LINES; i++) {
+        if (i > 0) strncat(joined, "|", sizeof(joined) - strlen(joined) - 1);
+        strncat(joined, m->text[i], sizeof(joined) - strlen(joined) - 1);
+    }
+    if (!joined[0]) snprintf(joined, sizeof(joined), "HEY|OUCH|GET BACK");
+    SwkbdState swkbd;
+    swkbdInit(&swkbd, SWKBD_TYPE_NORMAL, 2, sizeof(joined) - 1);
+    swkbdSetHintText(&swkbd, "Enemy lines separated by |");
+    swkbdSetInitialText(&swkbd, joined);
+    SwkbdButton button = swkbdInputText(&swkbd, joined, sizeof(joined));
+    if (button != SWKBD_BUTTON_NONE) {
+        split_enemy_text(m, joined);
+        g_dirty = true;
+        snprintf(g_status, sizeof(g_status), "AI TEXT %d LINES", m->text_count);
+    }
+}
+
+
+static int prompt_int_value(const char *hint, int current, int lo, int hi) {
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%d", current);
+    SwkbdState swkbd;
+    swkbdInit(&swkbd, SWKBD_TYPE_NORMAL, 2, sizeof(buf) - 1);
+    swkbdSetHintText(&swkbd, hint ? hint : "Number");
+    swkbdSetInitialText(&swkbd, buf);
+    SwkbdButton button = swkbdInputText(&swkbd, buf, sizeof(buf));
+    if (button == SWKBD_BUTTON_NONE) return current;
+
+    int sign = 1;
+    int v = 0;
+    const char *p = buf;
+    while (*p == ' ') p++;
+    if (*p == '-') { sign = -1; p++; }
+    while (*p) {
+        if (*p >= '0' && *p <= '9') v = v * 10 + (*p - '0');
+        p++;
+    }
+    v *= sign;
+    return clampi32(v, lo, hi);
+}
+
+static void prompt_weapon_name(int weapon) {
+    if (weapon < 0 || weapon >= MAX_WEAPONS) return;
+    char name[sizeof(g_weapons[weapon].name)];
+    snprintf(name, sizeof(name), "%s", g_weapons[weapon].name[0] ? g_weapons[weapon].name : "WEAPON");
+    SwkbdState swkbd;
+    swkbdInit(&swkbd, SWKBD_TYPE_NORMAL, 2, sizeof(name) - 1);
+    swkbdSetHintText(&swkbd, "Weapon name");
+    swkbdSetInitialText(&swkbd, name);
+    SwkbdButton button = swkbdInputText(&swkbd, name, sizeof(name));
+    if (button != SWKBD_BUTTON_NONE) {
+        snprintf(g_weapons[weapon].name, sizeof(g_weapons[weapon].name), "%s", name);
+        g_dirty = true;
+        snprintf(g_status, sizeof(g_status), "WEAPON NAME %s", g_weapons[weapon].name);
+    }
+}
+
+static NPC *entity_editor_npc(void) {
+    if (g_entity_edit_mode != EDIT_MODE_NPC) return NULL;
+    return npc_find_at(g_entity_edit_x, g_entity_edit_y);
+}
+
+static EnemyMeta *entity_editor_enemy_meta(void) {
+    if (g_entity_edit_mode != EDIT_MODE_ENEMY) return NULL;
+    return enemy_meta_find_at(g_entity_edit_x, g_entity_edit_y);
+}
+
+static int entity_editor_row_count(void) {
+    if (g_entity_edit_mode == EDIT_MODE_NPC) return 13;
+    if (g_entity_edit_mode == EDIT_MODE_ENEMY) return 6;
+    if (g_entity_edit_mode == EDIT_MODE_WEAPON) return 8;
+    if (g_entity_edit_mode == EDIT_MODE_SPRITE) return 1;
+    return 1;
+}
+
+void close_entity_editor(void) {
+    if (g_settings_dirty) {
+        save_app_settings();
+        g_settings_dirty = false;
+    }
+    g_entity_edit_mode = EDIT_MODE_NONE;
+    g_entity_edit_cursor = 0;
+    snprintf(g_status, sizeof(g_status), "EDIT CLOSED");
+}
+
+void open_weapon_editor(int weapon) {
+    g_entity_edit_mode = EDIT_MODE_WEAPON;
+    g_entity_edit_cursor = 0;
+    g_entity_edit_weapon = clampi32(weapon, 0, MAX_WEAPONS - 1);
+    snprintf(g_status, sizeof(g_status), "WEAPON EDIT %s", weapon_name(g_entity_edit_weapon));
+}
+
+void open_entity_editor_at(int x, int y) {
+    uint8_t t = tile_at(&g_level, x, y);
+    if (t == TILE_NPC) {
+        NPC *n = npc_ensure_at(x, y);
+        if (!n) return;
+        g_entity_edit_mode = EDIT_MODE_NPC;
+        g_entity_edit_cursor = 0;
+        g_entity_edit_x = x;
+        g_entity_edit_y = y;
+        snprintf(g_status, sizeof(g_status), "NPC EDIT %d %d", x, y);
+    } else if (t == TILE_AI_SPAWN) {
+        EnemyMeta *m = enemy_meta_ensure_at(x, y);
+        if (!m) return;
+        if (m->hp == 0) m->hp = (uint8_t)(5 + ((x + y) & 3));
+        if (m->attack == 0) m->attack = 1;
+        g_entity_edit_mode = EDIT_MODE_ENEMY;
+        g_entity_edit_cursor = 0;
+        g_entity_edit_x = x;
+        g_entity_edit_y = y;
+        snprintf(g_status, sizeof(g_status), "ENEMY EDIT %d %d", x, y);
+    }
+}
+
+static void cycle_npc_reward(NPC *n, int dir) {
+    if (!n) return;
+    int r = n->reward_kind;
+    if (dir >= 0) {
+        if (r == REWARD_DOT) r = REWARD_KEY;
+        else if (r == REWARD_KEY) r = REWARD_PINK;
+        else if (r == REWARD_PINK) r = REWARD_PURPLE;
+        else if (r == REWARD_PURPLE) r = REWARD_WEAPON_BASE;
+        else if (r >= REWARD_WEAPON_BASE && r < REWARD_WEAPON_BASE + MAX_WEAPONS - 1) r++;
+        else r = REWARD_DOT;
+    } else {
+        if (r == REWARD_DOT) r = REWARD_WEAPON_BASE + MAX_WEAPONS - 1;
+        else if (r > REWARD_WEAPON_BASE && r < REWARD_WEAPON_BASE + MAX_WEAPONS) r--;
+        else if (r == REWARD_WEAPON_BASE) r = REWARD_PURPLE;
+        else if (r == REWARD_PURPLE) r = REWARD_PINK;
+        else if (r == REWARD_PINK) r = REWARD_KEY;
+        else if (r == REWARD_KEY) r = REWARD_DOT;
+        else r = REWARD_DOT;
+    }
+    n->reward_kind = (uint8_t)r;
+    if (n->reward_amount < 1) n->reward_amount = 1;
+}
+
+static void cycle_npc_quest(NPC *n, int dir) {
+    if (!n) return;
+    int q = n->quest_type;
+    q += (dir >= 0) ? 1 : -1;
+    if (q < QUEST_NONE) q = QUEST_NPC;
+    if (q > QUEST_NPC) q = QUEST_NONE;
+    n->quest_type = (uint8_t)q;
+    if (n->quest_type == QUEST_NONE) n->quest_target = 0;
+    else if (n->quest_target == 0) n->quest_target = 1;
+}
+
+void handle_entity_edit_input(u32 kDown) {
+    if (g_entity_edit_mode == EDIT_MODE_NONE) return;
+    if (g_entity_edit_mode == EDIT_MODE_SPRITE) { handle_sprite_edit_input(kDown); return; }
+
+    int rows = entity_editor_row_count();
+    if (kDown & KEY_DUP) g_entity_edit_cursor = (g_entity_edit_cursor + rows - 1) % rows;
+    if (kDown & KEY_DDOWN) g_entity_edit_cursor = (g_entity_edit_cursor + 1) % rows;
+    if (kDown & KEY_B) { close_entity_editor(); return; }
+
+    int dir = 0;
+    if (kDown & KEY_DLEFT) dir = -1;
+    if (kDown & KEY_DRIGHT) dir = 1;
+    int big = 0;
+    if (kDown & KEY_L) big = -1;
+    if (kDown & KEY_R) big = 1;
+
+    if (g_entity_edit_mode == EDIT_MODE_NPC) {
+        NPC *n = entity_editor_npc();
+        if (!n) { close_entity_editor(); return; }
+        switch (g_entity_edit_cursor) {
+            case 0:
+                if (kDown & KEY_A) edit_npc_text_and_reward(n);
+                break;
+            case 1:
+                if (dir || (kDown & KEY_A)) { cycle_npc_quest(n, dir >= 0 ? 1 : -1); g_dirty = true; }
+                break;
+            case 2:
+                if (dir || big) {
+                    int step = big ? big * 10 : dir;
+                    n->quest_target = (uint16_t)clampi32((int)n->quest_target + step, 0, 999);
+                    g_dirty = true;
+                }
+                if (kDown & KEY_A) { n->quest_target = (uint16_t)prompt_int_value("Quest target", n->quest_target, 0, 999); g_dirty = true; }
+                break;
+            case 3:
+                if (dir || (kDown & KEY_A)) { cycle_npc_reward(n, dir >= 0 ? 1 : -1); g_dirty = true; }
+                break;
+            case 4:
+                if (dir || big) {
+                    int step = big ? big * 5 : dir;
+                    n->reward_amount = (uint16_t)clampi32((int)n->reward_amount + step, 1, 99);
+                    g_dirty = true;
+                }
+                if (kDown & KEY_A) { n->reward_amount = (uint16_t)prompt_int_value("Reward amount", n->reward_amount, 1, 99); g_dirty = true; }
+                break;
+            case 5:
+                if (dir || (kDown & KEY_A)) { n->text_mode = (uint8_t)((n->text_mode + (dir < 0 ? 2 : 1)) % 3); g_dirty = true; }
+                break;
+            case 6:
+                if (dir || (kDown & KEY_A)) { n->color_id = (uint8_t)((n->color_id + (dir < 0 ? 7 : 1)) & 7); g_dirty = true; }
+                break;
+            case 7:
+                if (kDown & KEY_A) open_sprite_editor(SPRITE_TARGET_NPC);
+                break;
+            case 8:
+                if (dir || (kDown & KEY_A)) { g_default_npc_color = (uint8_t)((g_default_npc_color + (dir < 0 ? 7 : 1)) & 7); g_settings_dirty = true; }
+                break;
+            case 9:
+                if (kDown & KEY_A) open_sprite_editor(SPRITE_TARGET_DEFAULT_NPC);
+                break;
+            case 10:
+                if (kDown & KEY_A) { n->color_id = g_default_npc_color & 7; memcpy(n->sprite, g_default_npc_sprite, SPRITE_BYTES); g_dirty = true; snprintf(g_status, sizeof(g_status), "NPC USE DEFAULT LOOK"); }
+                break;
+            case 11:
+                if (kDown & KEY_A) {
+                    int wi = (n->reward_kind >= REWARD_WEAPON_BASE && n->reward_kind < REWARD_WEAPON_BASE + MAX_WEAPONS) ? n->reward_kind - REWARD_WEAPON_BASE : g_entity_edit_weapon;
+                    open_weapon_editor(wi);
+                }
+                break;
+            case 12:
+                if (kDown & KEY_A) close_entity_editor();
+                break;
+        }
+        snprintf(g_status, sizeof(g_status), "NPC %s T%d", reward_kind_name(n->reward_kind), n->quest_target);
+        return;
+    }
+
+    if (g_entity_edit_mode == EDIT_MODE_ENEMY) {
+        EnemyMeta *m = entity_editor_enemy_meta();
+        if (!m) { close_entity_editor(); return; }
+        switch (g_entity_edit_cursor) {
+            case 0:
+                if (kDown & KEY_A) edit_enemy_text_meta(m);
+                break;
+            case 1:
+                if (dir || big) { int step = big ? big * 5 : dir; m->hp = (uint8_t)clampi32((int)m->hp + step, 1, 99); g_dirty = true; }
+                if (kDown & KEY_A) { m->hp = (uint8_t)prompt_int_value("Enemy HP", m->hp, 1, 99); g_dirty = true; }
+                break;
+            case 2:
+                if (dir || big) { int step = big ? big * 5 : dir; m->attack = (uint8_t)clampi32((int)m->attack + step, 1, 99); g_dirty = true; }
+                if (kDown & KEY_A) { m->attack = (uint8_t)prompt_int_value("Enemy attack", m->attack, 1, 99); g_dirty = true; }
+                break;
+            case 3:
+                if (dir || (kDown & KEY_A)) { m->color_id = (uint8_t)((m->color_id + (dir < 0 ? 7 : 1)) & 7); g_dirty = true; }
+                break;
+            case 4:
+                if (kDown & KEY_A) open_sprite_editor(SPRITE_TARGET_ENEMY);
+                break;
+            case 5:
+                if (kDown & KEY_A) close_entity_editor();
+                break;
+        }
+        snprintf(g_status, sizeof(g_status), "ENEMY HP%d ATK%d", m->hp, m->attack);
+        return;
+    }
+
+    if (g_entity_edit_mode == EDIT_MODE_WEAPON) {
+        int wi = clampi32(g_entity_edit_weapon, 0, MAX_WEAPONS - 1);
+        WeaponDef *w = &g_weapons[wi];
+        switch (g_entity_edit_cursor) {
+            case 0:
+                if (dir || (kDown & KEY_A)) g_entity_edit_weapon = (g_entity_edit_weapon + (dir < 0 ? MAX_WEAPONS - 1 : 1)) % MAX_WEAPONS;
+                break;
+            case 1:
+                if (kDown & KEY_A) prompt_weapon_name(wi);
+                break;
+            case 2:
+                if (dir || big) { int step = big ? big * 5 : dir; w->damage = (uint8_t)clampi32((int)w->damage + step, 1, 99); g_dirty = true; }
+                if (kDown & KEY_A) { w->damage = (uint8_t)prompt_int_value("Weapon damage", w->damage, 1, 99); g_dirty = true; }
+                break;
+            case 3:
+                if (dir || big) { int step = big ? big * 2 : dir; w->range = (uint8_t)clampi32((int)w->range + step, 1, 8); g_dirty = true; }
+                if (kDown & KEY_A) { w->range = (uint8_t)prompt_int_value("Weapon range", w->range, 1, 8); g_dirty = true; }
+                break;
+            case 4:
+                if (dir || big) { int step = big ? big * 5 : dir; w->cooldown = (uint8_t)clampi32((int)w->cooldown + step, 1, 99); g_dirty = true; }
+                if (kDown & KEY_A) { w->cooldown = (uint8_t)prompt_int_value("Cooldown frames", w->cooldown, 1, 99); g_dirty = true; }
+                break;
+            case 5:
+                if (dir || (kDown & KEY_A)) { w->color_id = (uint8_t)((w->color_id + (dir < 0 ? 7 : 1)) & 7); g_dirty = true; }
+                break;
+            case 6:
+                if (kDown & KEY_A) open_sprite_editor(SPRITE_TARGET_WEAPON);
+                break;
+            case 7:
+                if (kDown & KEY_A) close_entity_editor();
+                break;
+        }
+        snprintf(g_status, sizeof(g_status), "%s D%d R%d C%d", weapon_name(g_entity_edit_weapon), g_weapons[g_entity_edit_weapon].damage, g_weapons[g_entity_edit_weapon].range, g_weapons[g_entity_edit_weapon].cooldown);
+        return;
+    }
+}
+
+static int collectible_value(int kind) {
+    if (kind == REWARD_KEY) return 0;
+    if (kind == REWARD_PINK) return 5;
+    if (kind == REWARD_PURPLE) return 10;
+    return 1;
+}
+
+static bool add_pickup_at(float x, float y, int kind, int amount) {
+    if (g_collectible_count >= MAX_COLLECTIBLES) return false;
+    Collectible *c = &g_collectibles[g_collectible_count++];
+    memset(c, 0, sizeof(*c));
+    c->active = true;
+    c->x = (int)x;
+    c->y = (int)y;
+    c->fx = x;
+    c->fy = y;
+    c->kind = kind;
+    if (amount < 1) amount = 1;
+    /* amount is encoded by duplicating score/key grants through kind-specific handling for now. */
+    g_collectibles_left++;
+    return true;
+}
+
+static bool spawn_reward_in_front(Level *lv, int reward_kind, int reward_amount) {
+    if (!lv) return false;
+    float fx = lv->player_x + cosf(lv->player_angle) * 0.95f;
+    float fy = lv->player_y + sinf(lv->player_angle) * 0.95f;
+    int tx = (int)fx;
+    int ty = (int)fy;
+    if (tx <= 0 || ty <= 0 || tx >= lv->width - 1 || ty >= lv->height - 1 || tile_blocks_side(tile_at(lv, tx, ty), 0.0f)) {
+        fx = lv->player_x;
+        fy = lv->player_y;
+    }
+    bool ok = false;
+    int count = reward_amount < 1 ? 1 : reward_amount;
+    for (int i = 0; i < count; i++) {
+        float ox = ((i % 3) - 1) * 0.18f;
+        float oy = ((i / 3) % 3) * 0.18f;
+        ok = add_pickup_at(fx + ox, fy + oy, reward_kind, 1) || ok;
+    }
+    return ok;
+}
+
+static int completed_npc_count(void) {
+    int n = 0;
+    for (int i = 0; i < g_npc_count; i++) if (g_npcs[i].active && g_npcs[i].completed) n++;
+    return n;
+}
+
+static bool npc_quest_ready(const NPC *n) {
+    if (!n || n->completed) return false;
+    switch (n->quest_type) {
+        case QUEST_NONE: return true;
+        case QUEST_COINS: return g_player_score >= (int)n->quest_target;
+        case QUEST_KEY: return g_player_keys >= (int)n->quest_target;
+        case QUEST_NPC: return completed_npc_count() >= (int)n->quest_target;
+        default: return false;
+    }
+}
+
+static const char *npc_quest_desc(const NPC *n) {
+    static char buf[64];
+    if (!n) return "NO NPC";
+    if (n->quest_type == QUEST_NONE) snprintf(buf, sizeof(buf), "QUEST READY");
+    else if (n->quest_type == QUEST_COINS) snprintf(buf, sizeof(buf), "QUEST COINS %d/%d", g_player_score, n->quest_target);
+    else if (n->quest_type == QUEST_KEY) snprintf(buf, sizeof(buf), "QUEST KEYS %d/%d", g_player_keys, n->quest_target);
+    else snprintf(buf, sizeof(buf), "QUEST NPCS %d/%d", completed_npc_count(), n->quest_target);
+    return buf;
+}
+
+static void update_npc_talk_timers(float dt) {
+    for (int i = 0; i < g_npc_count; i++) {
+        if (g_npcs[i].active && g_npcs[i].talk_timer > 0.0f) {
+            g_npcs[i].talk_timer -= dt;
+            if (g_npcs[i].talk_timer < 0.0f) g_npcs[i].talk_timer = 0.0f;
+        }
+    }
+}
+
+static void talk_to_nearby_npc(Level *lv, u32 kDown) {
+    if (!lv || !(kDown & KEY_SELECT)) return;
+    NPC *best = NULL;
+    float best_d2 = 2.0f * 2.0f;
+    for (int i = 0; i < g_npc_count; i++) {
+        NPC *n = &g_npcs[i];
+        if (!n->active) continue;
+        float nx = (float)n->x + 0.5f;
+        float ny = (float)n->y + 0.5f;
+        float dx = lv->player_x - nx;
+        float dy = lv->player_y - ny;
+        float d2 = dx * dx + dy * dy;
+        if (d2 < best_d2) { best_d2 = d2; best = n; }
+    }
+    if (!best) {
+        snprintf(g_status, sizeof(g_status), "NO NPC NEARBY");
+        return;
+    }
+    best->talk_timer = 4.0f;
+    if (best->completed) {
+        snprintf(g_status, sizeof(g_status), "NPC DONE %s", best->text);
+        return;
+    }
+    if (!npc_quest_ready(best)) {
+        snprintf(g_status, sizeof(g_status), "%s", npc_quest_desc(best));
+        return;
+    }
+    if (best->quest_type == QUEST_KEY && g_player_keys >= (int)best->quest_target) {
+        g_player_keys -= (int)best->quest_target;
+    }
+    best->completed = true;
+    spawn_reward_in_front(lv, best->reward_kind, best->reward_amount);
+    snprintf(g_status, sizeof(g_status), "QUEST DONE REWARD DROPPED");
+}
+
+static void cycle_owned_weapon(void) {
+    int start = g_current_weapon;
+    for (int step = 0; step < MAX_WEAPONS; step++) {
+        int idx = (start + 1 + step + MAX_WEAPONS) % MAX_WEAPONS;
+        if (g_player_weapons[idx]) {
+            g_current_weapon = idx;
+            snprintf(g_status, sizeof(g_status), "%s DMG%d", weapon_name(idx), g_weapons[idx].damage);
+            return;
+        }
+    }
+    g_current_weapon = -1;
+    snprintf(g_status, sizeof(g_status), "NO WEAPON");
+}
+
+static void attack_with_weapon(Level *lv, u32 kDown) {
+    if (!lv || !(kDown & KEY_X) || g_attack_cooldown > 0.0f) return;
+    if (g_current_weapon < 0 || g_current_weapon >= MAX_WEAPONS || !g_player_weapons[g_current_weapon]) {
+        snprintf(g_status, sizeof(g_status), "NEED WEAPON");
+        return;
+    }
+
+    WeaponDef *w = &g_weapons[g_current_weapon];
+    float fx = cosf(lv->player_angle);
+    float fy = sinf(lv->player_angle);
+    float range = 0.85f + (float)w->range * 0.42f;
+    int best = -1;
+    float best_dot = 0.45f;
+    for (int i = 0; i < g_enemy_count; i++) {
+        Enemy *e = &g_enemies[i];
+        if (!e->active) continue;
+        float dx = e->x - lv->player_x;
+        float dy = e->y - lv->player_y;
+        float d2 = dx * dx + dy * dy;
+        if (d2 > range * range || d2 < 0.0001f) continue;
+        float dist = sqrtf(d2);
+        float dot = (dx * fx + dy * fy) / dist;
+        if (dot > best_dot && ai_line_of_sight(lv, lv->player_x, lv->player_y, e->x, e->y)) {
+            best_dot = dot;
+            best = i;
+        }
+    }
+
+    g_attack_cooldown = ((float)w->cooldown) / 60.0f;
+    if (best < 0) {
+        snprintf(g_status, sizeof(g_status), "%s MISS", weapon_name(g_current_weapon));
+        return;
+    }
+    Enemy *e = &g_enemies[best];
+    e->hp -= (int)w->damage;
+    e->state = 1;
+    if (e->text_count > 0) {
+        e->text_index = (uint8_t)((e->text_index + 1) % e->text_count);
+        e->text_timer = 1.35f;
+    }
+    if (e->hp <= 0) {
+        e->active = false;
+        g_player_score += 3;
+        snprintf(g_status, sizeof(g_status), "%s KO +3", weapon_name(g_current_weapon));
+    } else {
+        snprintf(g_status, sizeof(g_status), "%s HIT HP%d", weapon_name(g_current_weapon), e->hp);
+    }
+}
+
 void reset_runtime_entities(void) {
     memset(g_enemies, 0, sizeof(g_enemies));
     memset(g_collectibles, 0, sizeof(g_collectibles));
     memset(g_doors, 0, sizeof(g_doors));
+    if (!g_loaded_npc_metadata) memset(g_npcs, 0, sizeof(g_npcs));
     g_enemy_count = 0;
     g_collectible_count = 0;
     g_collectibles_left = 0;
     g_door_count = 0;
+    if (!g_loaded_npc_metadata) g_npc_count = 0;
     g_player_keys = 0;
     g_player_score = 0;
+    for (int i = 0; i < MAX_WEAPONS; i++) g_player_weapons[i] = false;
+    g_current_weapon = -1;
+    g_attack_cooldown = 0.0f;
     g_has_success = false;
     g_success_x = 0.0f;
     g_success_y = 0.0f;
@@ -379,22 +1179,46 @@ void spawn_entities_from_level(const Level *lv) {
                 e->angle = ((float)((x * 37 + y * 101) & 255) / 255.0f) * TWO_PI_F;
                 e->speed = 1.35f;
                 e->roam_timer = 0.25f + (float)((x + y) & 7) * 0.18f;
-                e->hp = 1;
+                e->hp = 4 + ((x + y) % 4);
+                e->attack = 1;
+                EnemyMeta *meta = enemy_meta_find_at(x, y);
+                e->color_id = (uint8_t)((x + y) & 7);
+                copy_default_sprite(e->sprite, SPRITE_TARGET_ENEMY);
+                if (meta) {
+                    if (meta->hp > 0) e->hp = meta->hp;
+                    if (meta->attack > 0) e->attack = meta->attack;
+                    e->color_id = meta->color_id & 7;
+                    memcpy(e->sprite, meta->sprite, SPRITE_BYTES);
+                    ensure_sprite_or_default(e->sprite, SPRITE_TARGET_ENEMY);
+                }
+                e->hp_max = e->hp;
                 e->state = 0;
+                e->text_count = 0;
+                e->text_index = 0;
+                e->text_timer = 0.0f;
+                if (meta && meta->text_count > 0) {
+                    e->text_count = meta->text_count;
+                    if (e->text_count > ENEMY_TEXT_LINES) e->text_count = ENEMY_TEXT_LINES;
+                    for (int li = 0; li < e->text_count; li++) {
+                        snprintf(e->text[li], sizeof(e->text[li]), "%s", meta->text[li]);
+                    }
+                } else {
+                    e->text_count = 2;
+                    snprintf(e->text[0], sizeof(e->text[0]), "HEY");
+                    snprintf(e->text[1], sizeof(e->text[1]), "GRR");
+                }
             } else if (t == TILE_SUCCESS && !g_has_success) {
                 g_has_success = true;
                 g_success_x = (float)x + 0.5f;
                 g_success_y = (float)y + 0.5f;
-            } else if ((t == TILE_DOT || t == TILE_KEY) && g_collectible_count < MAX_COLLECTIBLES) {
-                Collectible *c = &g_collectibles[g_collectible_count++];
-                memset(c, 0, sizeof(*c));
-                c->active = true;
-                c->x = x;
-                c->y = y;
-                c->fx = (float)x + 0.5f;
-                c->fy = (float)y + 0.5f;
-                c->kind = (t == TILE_KEY) ? 1 : 0;
-                g_collectibles_left++;
+            } else if (t == TILE_NPC) {
+                npc_ensure_at(x, y);
+            } else if ((t == TILE_DOT || t == TILE_PINK || t == TILE_PURPLE || t == TILE_KEY) && g_collectible_count < MAX_COLLECTIBLES) {
+                int kind = REWARD_DOT;
+                if (t == TILE_KEY) kind = REWARD_KEY;
+                else if (t == TILE_PINK) kind = REWARD_PINK;
+                else if (t == TILE_PURPLE) kind = REWARD_PURPLE;
+                add_pickup_at((float)x + 0.5f, (float)y + 0.5f, kind, 1);
             } else if (t == TILE_DOOR && g_door_count < MAX_DOORS) {
                 Door *d = &g_doors[g_door_count++];
                 memset(d, 0, sizeof(*d));
@@ -404,6 +1228,21 @@ void spawn_entities_from_level(const Level *lv) {
                 d->y = y;
                 d->open_t = 0.0f;
             }
+        }
+    }
+
+    if (g_random_play && g_collectible_count < MAX_COLLECTIBLES) {
+        for (int y = 2; y < lv->height - 2; y++) {
+            bool placed = false;
+            for (int x = 2; x < lv->width - 2; x++) {
+                if ((lv->tiles[y * lv->width + x] & MAX_TILE_ID) == 0) {
+                    int w = (int)(rng_next(&g_random_seed) % MAX_WEAPONS);
+                    add_pickup_at((float)x + 0.5f, (float)y + 0.5f, REWARD_WEAPON_BASE + w, 1);
+                    placed = true;
+                    break;
+                }
+            }
+            if (placed) break;
         }
     }
 }
@@ -422,13 +1261,19 @@ static void update_collectibles_and_doors(Level *lv, float dt) {
         if ((dx * dx + dy * dy) <= key_r2 && fabsf(dz) < 0.85f) {
             c->active = false;
             if (g_collectibles_left > 0) g_collectibles_left--;
-            if (c->kind == 1) {
+            if (c->kind == REWARD_KEY) {
                 g_player_keys++;
                 g_player_score += 10;
                 snprintf(g_status, sizeof(g_status), "KEY +1  KEYS %d", g_player_keys);
+            } else if (c->kind >= REWARD_WEAPON_BASE && c->kind < REWARD_WEAPON_BASE + MAX_WEAPONS) {
+                int w = c->kind - REWARD_WEAPON_BASE;
+                g_player_weapons[w] = true;
+                if (g_current_weapon < 0) g_current_weapon = w;
+                snprintf(g_status, sizeof(g_status), "GOT %s DMG%d", weapon_name(w), g_weapons[w].damage);
             } else {
-                g_player_score++;
-                snprintf(g_status, sizeof(g_status), "DOT +1  SCORE %d", g_player_score);
+                int value = collectible_value(c->kind);
+                g_player_score += value;
+                snprintf(g_status, sizeof(g_status), "+%d SCORE %d", value, g_player_score);
             }
         }
     }
@@ -509,6 +1354,7 @@ static void reset_player_after_caught(Level *lv) {
         e->y = e->start_y;
         e->z = e->start_z;
         e->angle += 1.57f;
+        e->text_timer = 0.8f;
     }
 
     snprintf(g_status, sizeof(g_status), "CAUGHT - RESET");
@@ -550,8 +1396,15 @@ static void update_enemies(Level *lv, float dt) {
         float dist2 = to_px * to_px + to_py * to_py;
 
         if (dist2 < 0.18f) {
+            int atk = e->attack > 0 ? e->attack : 1;
             reset_player_after_caught(lv);
+            snprintf(g_status, sizeof(g_status), "HIT %d - RESET", atk);
             return;
+        }
+
+        if (e->text_timer > 0.0f) {
+            e->text_timer -= dt;
+            if (e->text_timer < 0.0f) e->text_timer = 0.0f;
         }
 
         bool chase = ai_can_spot_player(lv, e, to_px, to_py, dist2);
@@ -563,6 +1416,7 @@ static void update_enemies(Level *lv, float dt) {
             dir_x = to_px * inv_dist;
             dir_y = to_py * inv_dist;
             e->angle = atan2f(dir_y, dir_x);
+            if (!e->state && e->text_count > 0) e->text_timer = 1.0f;
             e->state = 1;
         } else {
             e->state = 0;
@@ -747,13 +1601,48 @@ void generate_random_maze(Level *lv, uint32_t seed) {
         placed++;
     }
 
+
+    int target_items = 30;
+    placed = 0;
+    attempts = 0;
+    while (placed < target_items && attempts < 6000) {
+        attempts++;
+        int cx = (int)(rng_next(&g_random_seed) % (uint32_t)cells_w);
+        int cy = (int)(rng_next(&g_random_seed) % (uint32_t)cells_h);
+        if (cx < 3 && cy < 3) continue;
+        if (cx == cells_w - 1 && cy == cells_h - 1) continue;
+        int ox, oy;
+        maze_cell_origin(cx, cy, &ox, &oy);
+        if (lv->tiles[oy * lv->width + ox] != 0) continue;
+        uint32_t r = rng_next(&g_random_seed) % 10u;
+        lv->tiles[oy * lv->width + ox] = (r == 0) ? TILE_PURPLE : ((r < 3) ? TILE_PINK : TILE_DOT);
+        placed++;
+    }
+
+    placed = 0;
+    attempts = 0;
+    while (placed < 3 && attempts < 2000) {
+        attempts++;
+        int cx = (int)(rng_next(&g_random_seed) % (uint32_t)cells_w);
+        int cy = (int)(rng_next(&g_random_seed) % (uint32_t)cells_h);
+        if (cx < 5 && cy < 5) continue;
+        if (cx == cells_w - 1 && cy == cells_h - 1) continue;
+        int ox, oy;
+        maze_cell_origin(cx, cy, &ox, &oy);
+        if (lv->tiles[oy * lv->width + ox] != 0) continue;
+        lv->tiles[oy * lv->width + ox] = (placed == 0) ? TILE_KEY : TILE_NPC;
+        placed++;
+    }
+
     snprintf(g_level_name, sizeof(g_level_name), "RANDOM %04lX", (unsigned long)(seed & 0xFFFFu));
     force_valid_spawn(lv);
 }
 
 static void enter_random_seed_play(void) {
     uint32_t seed = (uint32_t)svcGetSystemTick();
+    g_loaded_npc_metadata = false;
     generate_random_maze(&g_level, seed);
+    randomize_weapon_stats(seed);
     g_random_play = true;
     g_edit_mode = false;
     g_in_menu = false;
@@ -774,11 +1663,14 @@ static void enter_random_seed_play(void) {
 
 void enter_slot(bool edit_mode) {
     if (!load_bwl_slot(&g_level)) {
+        g_loaded_npc_metadata = false;
         new_open_level(&g_level);
         default_slot_name(g_slot, g_level_name, sizeof(g_level_name));
         g_dirty = true;
         snprintf(g_status, sizeof(g_status), "NEW SLOT %d", g_slot);
     }
+
+    if (!g_loaded_npc_metadata) randomize_weapon_stats(checksum_level_tiles(&g_level));
 
     g_edit_mode = edit_mode;
     g_in_menu = false;
@@ -829,8 +1721,8 @@ static void reset_settings_defaults(void) {
     g_bob_phase = 0.0f;
     g_bob_amount = 0.0f;
     g_camera_speed = 0.0f;
-    save_app_settings();
-    snprintf(g_status, sizeof(g_status), "SETTINGS DEFAULT SAVED");
+    g_settings_dirty = true;
+    snprintf(g_status, sizeof(g_status), "SETTINGS DEFAULTS");
 }
 
 static void adjust_setting(int dir) {
@@ -878,9 +1770,13 @@ static void adjust_setting(int dir) {
             g_debug_overlay = !g_debug_overlay;
             snprintf(g_status, sizeof(g_status), "DEBUG %s", g_debug_overlay ? "ON" : "OFF");
             break;
+        case 10:
+            g_default_npc_color = (uint8_t)((g_default_npc_color + (dir > 0 ? 1 : 7)) & 7);
+            snprintf(g_status, sizeof(g_status), "DEFAULT NPC COLOR %d", g_default_npc_color);
+            break;
     }
 
-    save_app_settings();
+    g_settings_dirty = true;
 }
 
 static void handle_settings_menu_input(u32 kDown) {
@@ -893,12 +1789,20 @@ static void handle_settings_menu_input(u32 kDown) {
     if (kDown & KEY_X) reset_settings_defaults();
 
     if (kDown & KEY_B) {
+        if (g_settings_dirty) {
+            save_app_settings();
+            g_settings_dirty = false;
+        }
         g_settings_menu = false;
-        snprintf(g_status, sizeof(g_status), "SETTINGS CLOSED");
+        snprintf(g_status, sizeof(g_status), "SETTINGS SAVED");
     }
 }
 
 void handle_world_menu_input(u32 kDown) {
+    if (g_entity_edit_mode != EDIT_MODE_NONE) {
+        handle_entity_edit_input(kDown);
+        return;
+    }
     if (g_settings_menu) {
         handle_settings_menu_input(kDown);
         return;
@@ -981,6 +1885,11 @@ void handle_world_menu_input(u32 kDown) {
                     g_delete_armed = false;
                 }
                 break;
+            case MENU_ACTION_WEAPONS:
+                open_weapon_editor(g_entity_edit_weapon);
+                g_delete_armed = false;
+                snprintf(g_status, sizeof(g_status), "WEAPON EDIT");
+                break;
             case MENU_ACTION_SETTINGS:
                 g_settings_menu = true;
                 g_delete_armed = false;
@@ -1000,6 +1909,15 @@ void update_physics_and_movement(float dt, u32 kDown, u32 kHeld) {
         }
         return;
     }
+
+    if (g_attack_cooldown > 0.0f) {
+        g_attack_cooldown -= dt;
+        if (g_attack_cooldown < 0.0f) g_attack_cooldown = 0.0f;
+    }
+    update_npc_talk_timers(dt);
+    if (kDown & KEY_Y) cycle_owned_weapon();
+    attack_with_weapon(lv, kDown);
+    talk_to_nearby_npc(lv, kDown);
 
     apply_vertical_physics(lv, dt, kDown, true);
     apply_lr_look(lv, dt, kHeld, true);
@@ -1044,33 +1962,35 @@ static bool handle_editor_touch_controls(const Level *lv, const touchPosition *t
     if (!tp || !(kDown & KEY_TOUCH)) return false;
     if (tp->py < EDITOR_CTRL_Y) return false;
 
-    if (tp->px < 180) return false;
+    /* Left panel is the 4x4 tile palette. */
+    if (tp->px < 100) return false;
 
-    if (touch_in_rect(tp, 184, 221, 203, 240)) {
+    if (touch_in_rect(tp, 108, 188, 144, 206)) {
         editor_zoom_out(lv);
         return true;
     }
-    if (touch_in_rect(tp, 206, 221, 225, 240)) {
+    if (touch_in_rect(tp, 148, 188, 184, 206)) {
         editor_zoom_in(lv);
         return true;
     }
-    if (touch_in_rect(tp, 228, 221, 253, 240)) {
+    if (touch_in_rect(tp, 108, 210, 184, 232)) {
         editor_zoom_fit(lv);
         return true;
     }
-    if (touch_in_rect(tp, 258, 221, 276, 240)) {
+
+    if (touch_in_rect(tp, 218, 214, 248, 236)) {
         editor_pan_view(lv, -1, 0);
         return true;
     }
-    if (touch_in_rect(tp, 279, 212, 297, 226)) {
+    if (touch_in_rect(tp, 252, 188, 286, 210)) {
         editor_pan_view(lv, 0, -1);
         return true;
     }
-    if (touch_in_rect(tp, 279, 226, 297, 240)) {
+    if (touch_in_rect(tp, 252, 214, 286, 236)) {
         editor_pan_view(lv, 0, 1);
         return true;
     }
-    if (touch_in_rect(tp, 300, 221, 320, 240)) {
+    if (touch_in_rect(tp, 290, 214, 320, 236)) {
         editor_pan_view(lv, 1, 0);
         return true;
     }
@@ -1091,14 +2011,14 @@ void editor_touch(u32 kDown, u32 kHeld) {
 
     if (handle_editor_touch_controls(lv, &tp, kDown)) return;
 
-    if (tp.py >= EDITOR_CTRL_Y && tp.px < 180) {
+    if (tp.py >= EDITOR_CTRL_Y && tp.px < 100) {
         for (int t = 0; t <= MAX_TILE_ID; t++) {
-            int row = t / 8;
-            int col = t & 7;
-            int x0 = PALETTE_X + col * PALETTE_STEP;
-            int y0 = 214 + row * 13;
-            if (tp.px >= x0 - 2 && tp.px <= x0 + PALETTE_W + 2 &&
-                tp.py >= y0 - 1 && tp.py <= y0 + 11) {
+            int row = t / 4;
+            int col = t & 3;
+            int x0 = 4 + col * 23;
+            int y0 = 188 + row * 12;
+            if (tp.px >= x0 - 2 && tp.px <= x0 + 19 + 2 &&
+                tp.py >= y0 - 1 && tp.py <= y0 + 10 + 1) {
                 g_selected_tile = (uint8_t)t;
                 snprintf(g_status, sizeof(g_status), "%s", tile_short_name(g_selected_tile));
                 return;
@@ -1119,6 +2039,51 @@ void editor_touch(u32 kDown, u32 kHeld) {
     if (local_x < 0 || local_y < 0 || local_x >= vw || local_y >= vh) return;
     if (x < 0 || y < 0 || x >= lv->width || y >= lv->height) return;
 
+    uint8_t cur_tile = tile_at(lv, x, y);
+    if ((cur_tile == TILE_AI_SPAWN || cur_tile == TILE_NPC) && (kHeld & KEY_A)) {
+        open_entity_editor_at(x, y);
+        return;
+    }
+    if (cur_tile == TILE_NPC && (kHeld & KEY_L)) {
+        NPC *n = npc_ensure_at(x, y);
+        if (n) {
+            n->color_id = (uint8_t)((n->color_id + 1) & 7);
+            g_dirty = true;
+            snprintf(g_status, sizeof(g_status), "NPC COLOR %d", n->color_id);
+        }
+        return;
+    }
+    if (cur_tile == TILE_NPC && (kHeld & KEY_Y)) {
+        NPC *n = npc_ensure_at(x, y);
+        if (n) {
+            n->quest_type = (uint8_t)((n->quest_type + 1) % 4);
+            if (n->quest_type == QUEST_NONE) n->quest_target = 0;
+            else if (n->quest_type == QUEST_COINS) n->quest_target = 5;
+            else if (n->quest_type == QUEST_KEY) n->quest_target = 1;
+            else n->quest_target = 1;
+            g_dirty = true;
+            snprintf(g_status, sizeof(g_status), "%s", npc_quest_desc(n));
+        }
+        return;
+    }
+    if (cur_tile == TILE_NPC && (kHeld & KEY_R)) {
+        NPC *n = npc_ensure_at(x, y);
+        if (n) {
+            int r = n->reward_kind;
+            if (r == REWARD_DOT) r = REWARD_KEY;
+            else if (r == REWARD_KEY) r = REWARD_PINK;
+            else if (r == REWARD_PINK) r = REWARD_PURPLE;
+            else if (r == REWARD_PURPLE) r = REWARD_WEAPON_BASE;
+            else if (r >= REWARD_WEAPON_BASE && r < REWARD_WEAPON_BASE + MAX_WEAPONS - 1) r++;
+            else r = REWARD_DOT;
+            n->reward_kind = (uint8_t)r;
+            n->reward_amount = 1;
+            g_dirty = true;
+            snprintf(g_status, sizeof(g_status), "NPC REWARD %s", reward_kind_name(r));
+        }
+        return;
+    }
+
     if (kHeld & KEY_X) {
         if (tile_at(lv, x, y) >= 1 && tile_at(lv, x, y) <= 6) set_tile(lv, x, y, 0);
         lv->player_x = (float)x + 0.5f;
@@ -1136,6 +2101,8 @@ void editor_touch(u32 kDown, u32 kHeld) {
     } else {
         uint8_t old = tile_at(lv, x, y);
         set_tile(lv, x, y, g_selected_tile);
+        if (g_selected_tile == TILE_NPC) npc_ensure_at(x, y);
+        if (g_selected_tile == TILE_AI_SPAWN) enemy_meta_ensure_at(x, y);
         if (old != g_selected_tile) g_dirty = true;
         snprintf(g_status, sizeof(g_status), "PAINT %d %d", x, y);
     }
@@ -1167,21 +2134,18 @@ void handle_global_input(u32 kDown, u32 kHeld) {
         save_bwl2(&g_level);
         return;
     }
-
-    if ((kDown & KEY_Y) && !(kHeld & KEY_L)) {
-        load_bwl_slot(&g_level);
-        return;
-    }
-
-    if ((kDown & KEY_X) && !g_edit_mode) {
-        new_open_level(&g_level);
-        g_dirty = true;
-        snprintf(g_level_name, sizeof(g_level_name), "UNTITLED");
-        snprintf(g_status, sizeof(g_status), "NEW LEVEL");
-    }
+    // This was from a much simpler time (0.1.0) lmfao
+    // if ((kDown & KEY_Y) && !(kHeld & KEY_L)) {
+    //     load_bwl_slot(&g_level);
+    //     return;
+    // }
 }
 
 void handle_editor_input(float dt, u32 kDown, u32 kHeld) {
+    if (g_entity_edit_mode != EDIT_MODE_NONE) {
+        handle_entity_edit_input(kDown);
+        return;
+    }
     if (kDown & KEY_DUP) editor_zoom_in(&g_level);
     if (kDown & KEY_DDOWN) editor_zoom_out(&g_level);
 
