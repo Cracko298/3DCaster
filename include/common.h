@@ -75,6 +75,19 @@
 #define ENEMY_TEXT_MAX 32
 #define ENEMY_TEXT_LINES 3
 #define SPRITE_BYTES 8
+#define BOSS_SPRITE_W 14
+#define BOSS_SPRITE_H 14
+#define BOSS_SPRITE_ROWS 14
+#define AI_RANK_GRUNT 0
+#define AI_RANK_CAPTAIN 1
+#define AI_RANK_BOSS 2
+#define AI_SPAWN_NONE 0
+#define AI_SPAWN_GRUNT 1
+#define MAX_RENDERED_SPRITES 32
+#define ITEM_RENDER_DIST2 (22.0f * 22.0f)
+#define NPC_RENDER_DIST2 (28.0f * 28.0f)
+#define ENEMY_RENDER_DIST2 (32.0f * 32.0f)
+#define AI_SLEEP_DIST2 (36.0f * 36.0f)
 #define TEXT_MODE_INTERACT 0
 #define TEXT_MODE_NEAR 1
 #define TEXT_MODE_ALWAYS 2
@@ -87,6 +100,7 @@
 #define SPRITE_TARGET_ENEMY 2
 #define SPRITE_TARGET_WEAPON 3
 #define SPRITE_TARGET_DEFAULT_NPC 4
+#define SPRITE_TARGET_BOSS 5
 #define QUEST_NONE 0
 #define QUEST_COINS 1
 #define QUEST_KEY 2
@@ -154,15 +168,27 @@ typedef struct {
     float angle;
     float speed;
     float roam_timer;
+    float hit_timer;
+    float death_timer;
     int hp;
     int hp_max;
     int attack;
     int state;
+    bool dying;
     uint8_t text_count;
     uint8_t text_index;
     uint8_t color_id;
     uint8_t sprite[SPRITE_BYTES];
     float text_timer;
+    uint8_t ai_rank;
+    uint8_t spawn_kind;
+    uint8_t spawn_limit;
+    uint8_t command_range;
+    uint8_t ranged_attack;
+    float spawn_timer;
+    float ranged_timer;
+    int parent_index;
+    uint16_t boss_sprite[BOSS_SPRITE_ROWS];
     char text[ENEMY_TEXT_LINES][ENEMY_TEXT_MAX];
 } Enemy;
 
@@ -203,6 +229,12 @@ typedef struct {
     uint8_t attack;
     uint8_t color_id;
     uint8_t sprite[SPRITE_BYTES];
+    uint8_t ai_rank;
+    uint8_t spawn_kind;
+    uint8_t spawn_limit;
+    uint8_t command_range;
+    uint8_t ranged_attack;
+    uint16_t boss_sprite[BOSS_SPRITE_ROWS];
     uint8_t text_count;
     char text[ENEMY_TEXT_LINES][ENEMY_TEXT_MAX];
 } EnemyMeta;
@@ -299,9 +331,18 @@ extern int g_npc_count;
 extern int g_enemy_meta_count;
 extern int g_player_keys;
 extern int g_player_score;
+extern int g_coins_bank;
+extern int g_coins_total;
+extern int g_enemies_total;
+extern int g_enemies_killed;
+extern int g_missions_total;
+extern int g_missions_done;
+extern int g_success_percent;
 extern bool g_player_weapons[MAX_WEAPONS];
 extern int g_current_weapon;
 extern float g_attack_cooldown;
+extern float g_slash_timer;
+extern int g_slash_type;
 extern bool g_has_success;
 extern float g_success_x;
 extern float g_success_y;
@@ -328,6 +369,7 @@ extern int g_sprite_edit_target;
 extern int g_sprite_edit_cursor_x;
 extern int g_sprite_edit_cursor_y;
 extern int g_sprite_edit_return_mode;
+extern uint32_t g_frame_counter;
 
 
 float clampf32(float v, float lo, float hi);
