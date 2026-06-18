@@ -41,7 +41,7 @@ INCLUDES	:=	include
 GRAPHICS	:=	gfx
 GFXBUILD	:=	$(BUILD)
 APP_AUTHOR  := Cracko298
-APP_DESCRIPTION := A simple Ray-Caster with level saving, editing and loading.
+APP_DESCRIPTION := A 'simple' Raycaster Engine/Editor for 3DS.
 APP_NAME := 3DCaster
 APP_TITLE := 3DCaster
 #ROMFS		:=	romfs
@@ -52,7 +52,7 @@ APP_TITLE := 3DCaster
 #---------------------------------------------------------------------------------
 ARCH	:=	-march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
 
-CFLAGS	:=	-g -Wall -O2 -mword-relocations \
+CFLAGS	:=	-g -Wall -Os -flto=auto -fomit-frame-pointer -fno-math-errno -fno-semantic-interposition -mword-relocations \
 			-ffunction-sections \
 			$(ARCH)
 
