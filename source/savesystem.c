@@ -137,8 +137,8 @@ bool encode_bwl2_memory(const Level *lv, uint8_t **out_data, size_t *out_size) {
         for (int ti = 0; ok && ti < len; ti++) ok = ok && mem_put_u8(out, cap, &pos, (uint8_t)npc->text[ti]);
     }
 
-    /* Enemy metadata chunk with stats + text */
-    ok = ok && mem_put_u8(out, cap, &pos, 'E') && mem_put_u8(out, cap, &pos, 'N') && mem_put_u8(out, cap, &pos, 'M') && mem_put_u8(out, cap, &pos, '3');
+    /* Enemy metadata chunk with stats + text + hierarchy/boss data */
+    ok = ok && mem_put_u8(out, cap, &pos, 'E') && mem_put_u8(out, cap, &pos, 'N') && mem_put_u8(out, cap, &pos, 'M') && mem_put_u8(out, cap, &pos, '4');
     int em_count = (lv == &g_level) ? g_enemy_meta_count : 0;
     if (em_count < 0) em_count = 0;
     if (em_count > MAX_ENEMIES) em_count = MAX_ENEMIES;
@@ -151,6 +151,12 @@ bool encode_bwl2_memory(const Level *lv, uint8_t **out_data, size_t *out_size) {
         ok = ok && mem_put_u8(out, cap, &pos, m->attack ? m->attack : 1);
         ok = ok && mem_put_u8(out, cap, &pos, m->color_id);
         for (int si = 0; ok && si < SPRITE_BYTES; si++) ok = ok && mem_put_u8(out, cap, &pos, m->sprite[si]);
+        ok = ok && mem_put_u8(out, cap, &pos, m->ai_rank);
+        ok = ok && mem_put_u8(out, cap, &pos, m->spawn_kind);
+        ok = ok && mem_put_u8(out, cap, &pos, m->spawn_limit);
+        ok = ok && mem_put_u8(out, cap, &pos, m->command_range);
+        ok = ok && mem_put_u8(out, cap, &pos, m->ranged_attack);
+        for (int bi = 0; ok && bi < BOSS_SPRITE_ROWS; bi++) ok = ok && mem_put_u16_le(out, cap, &pos, m->boss_sprite[bi]);
         uint8_t tc = m->text_count;
         if (tc > ENEMY_TEXT_LINES) tc = ENEMY_TEXT_LINES;
         ok = ok && mem_put_u8(out, cap, &pos, tc);
@@ -415,6 +421,55 @@ static void parse_bw3_chunks(const uint8_t *p, size_t size) {
                 if (empty) copy_default_sprite(n->sprite, SPRITE_TARGET_NPC);
             }
             g_loaded_npc_metadata = true;
+        } else if (a == 'E' && b == 'N' && c == 'M' && d == '4') {
+            if (pos >= size) break;
+            int count = p[pos++];
+            if (count > MAX_ENEMIES) count = MAX_ENEMIES;
+            for (int i = 0; i < count && pos + 49 <= size; i++) {
+                EnemyMeta *m = &g_enemy_metas[g_enemy_meta_count++];
+                memset(m, 0, sizeof(*m));
+                m->active = true;
+                m->x = read_u16_le(p + pos); pos += 2;
+                m->y = read_u16_le(p + pos); pos += 2;
+                m->hp = p[pos++];
+                m->attack = p[pos++];
+                m->color_id = p[pos++];
+                for (int si = 0; si < SPRITE_BYTES && pos < size; si++) m->sprite[si] = p[pos++];
+                m->ai_rank = p[pos++];
+                if (m->ai_rank > AI_RANK_BOSS) m->ai_rank = AI_RANK_GRUNT;
+                m->spawn_kind = p[pos++];
+                if (m->spawn_kind > AI_SPAWN_GRUNT) m->spawn_kind = AI_SPAWN_NONE;
+                m->spawn_limit = p[pos++];
+                if (m->spawn_limit > 8) m->spawn_limit = 8;
+                m->command_range = p[pos++];
+                if (m->command_range == 0) m->command_range = 10;
+                m->ranged_attack = p[pos++] ? 1 : 0;
+                for (int bi = 0; bi < BOSS_SPRITE_ROWS && pos + 1 < size; bi++) {
+                    m->boss_sprite[bi] = read_u16_le(p + pos) & 0x3FFFu;
+                    pos += 2;
+                }
+                if (m->hp == 0) m->hp = (m->ai_rank == AI_RANK_BOSS) ? 24 : 5;
+                if (m->attack == 0) m->attack = 1;
+                bool empty = true; for (int si = 0; si < SPRITE_BYTES; si++) if (m->sprite[si]) empty = false;
+                if (empty) copy_default_sprite(m->sprite, SPRITE_TARGET_ENEMY);
+                bool bempty = true; for (int bi = 0; bi < BOSS_SPRITE_ROWS; bi++) if (m->boss_sprite[bi]) bempty = false;
+                if (bempty) {
+                    static const uint16_t def_boss[BOSS_SPRITE_ROWS] = {0x0300,0x0FC0,0x1FE0,0x36D8,0x7FFC,0x5AAC,0x7FFC,0x3FF8,0x1550,0x3FF8,0x0FC0,0x1248,0x324C,0x6006};
+                    memcpy(m->boss_sprite, def_boss, sizeof(def_boss));
+                }
+                if (pos >= size) break;
+                m->text_count = p[pos++];
+                if (m->text_count > ENEMY_TEXT_LINES) m->text_count = ENEMY_TEXT_LINES;
+                for (int li = 0; li < m->text_count && pos < size; li++) {
+                    int len = p[pos++];
+                    if (len >= ENEMY_TEXT_MAX) len = ENEMY_TEXT_MAX - 1;
+                    if (pos + (size_t)len > size) len = (int)(size - pos);
+                    memcpy(m->text[li], p + pos, len);
+                    m->text[li][len] = '\0';
+                    pos += len;
+                }
+            }
+            g_loaded_enemy_metadata = true;
         } else if (a == 'E' && b == 'N' && c == 'M' && d == '3') {
             if (pos >= size) break;
             int count = p[pos++];
@@ -433,6 +488,8 @@ static void parse_bw3_chunks(const uint8_t *p, size_t size) {
                 if (m->attack == 0) m->attack = 1;
                 bool empty = true; for (int si = 0; si < SPRITE_BYTES; si++) if (m->sprite[si]) empty = false;
                 if (empty) copy_default_sprite(m->sprite, SPRITE_TARGET_ENEMY);
+                m->ai_rank = AI_RANK_GRUNT; m->spawn_kind = AI_SPAWN_NONE; m->spawn_limit = 0; m->command_range = 10; m->ranged_attack = 0;
+                { static const uint16_t def_boss[BOSS_SPRITE_ROWS] = {0x0300,0x0FC0,0x1FE0,0x36D8,0x7FFC,0x5AAC,0x7FFC,0x3FF8,0x1550,0x3FF8,0x0FC0,0x1248,0x324C,0x6006}; memcpy(m->boss_sprite, def_boss, sizeof(def_boss)); }
                 m->text_count = p[pos++];
                 if (m->text_count > ENEMY_TEXT_LINES) m->text_count = ENEMY_TEXT_LINES;
                 for (int li = 0; li < m->text_count && pos < size; li++) {
@@ -461,6 +518,8 @@ static void parse_bw3_chunks(const uint8_t *p, size_t size) {
                 if (m->attack == 0) m->attack = 1;
                 m->color_id = (uint8_t)((m->x + m->y) & 7);
                 copy_default_sprite(m->sprite, SPRITE_TARGET_ENEMY);
+                m->ai_rank = AI_RANK_GRUNT; m->spawn_kind = AI_SPAWN_NONE; m->spawn_limit = 0; m->command_range = 10; m->ranged_attack = 0;
+                { static const uint16_t def_boss[BOSS_SPRITE_ROWS] = {0x0300,0x0FC0,0x1FE0,0x36D8,0x7FFC,0x5AAC,0x7FFC,0x3FF8,0x1550,0x3FF8,0x0FC0,0x1248,0x324C,0x6006}; memcpy(m->boss_sprite, def_boss, sizeof(def_boss)); }
                 m->text_count = p[pos++];
                 if (m->text_count > ENEMY_TEXT_LINES) m->text_count = ENEMY_TEXT_LINES;
                 for (int li = 0; li < m->text_count && pos < size; li++) {
@@ -487,6 +546,8 @@ static void parse_bw3_chunks(const uint8_t *p, size_t size) {
                 m->attack = 1;
                 m->color_id = (uint8_t)((m->x + m->y) & 7);
                 copy_default_sprite(m->sprite, SPRITE_TARGET_ENEMY);
+                m->ai_rank = AI_RANK_GRUNT; m->spawn_kind = AI_SPAWN_NONE; m->spawn_limit = 0; m->command_range = 10; m->ranged_attack = 0;
+                { static const uint16_t def_boss[BOSS_SPRITE_ROWS] = {0x0300,0x0FC0,0x1FE0,0x36D8,0x7FFC,0x5AAC,0x7FFC,0x3FF8,0x1550,0x3FF8,0x0FC0,0x1248,0x324C,0x6006}; memcpy(m->boss_sprite, def_boss, sizeof(def_boss)); }
                 m->text_count = p[pos++];
                 if (m->text_count > ENEMY_TEXT_LINES) m->text_count = ENEMY_TEXT_LINES;
                 for (int li = 0; li < m->text_count && pos < size; li++) {

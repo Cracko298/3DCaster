@@ -49,57 +49,91 @@ static void draw_column_aa(u8 *fb, int sx0, int sx1, int sy0, int sy1, Color c,
 }
 
 
-static void draw_billboard_sprite(u8 *fb,
-                                  float cam_x, float cam_y,
-                                  float dir_x, float dir_y,
-                                  float plane_x, float plane_y,
-                                  float center_y,
-                                  const float *zbuf,
-                                  float sprite_x, float sprite_y,
-                                  float height_scale,
-                                  Color base) {
-    float rx = sprite_x - cam_x;
-    float ry = sprite_y - cam_y;
-    float det = plane_x * dir_y - dir_x * plane_y;
-    if (fabsf(det) < 0.000001f) return;
 
-    float inv_det = 1.0f / det;
-    float transform_x = inv_det * (dir_y * rx - dir_x * ry);
-    float transform_y = inv_det * (-plane_y * rx + plane_x * ry);
-    if (transform_y <= 0.08f) return;
+static float g_wall_pixel_zbuf[RENDER_W * RENDER_H];
+static float g_sprite_pixel_zbuf[RENDER_W * RENDER_H];
 
-    int screen_x = (int)((RENDER_W * 0.5f) * (1.0f + transform_x / transform_y));
-    int sprite_h = (int)fabsf((RENDER_H / transform_y) * height_scale * clampf32(g_level_depth, 0.50f, 2.00f));
-    if (sprite_h < 4) sprite_h = 4;
-    if (sprite_h > RENDER_H * 2) sprite_h = RENDER_H * 2;
+static inline int rz_index(int x, int y) {
+    return y * RENDER_W + x;
+}
 
-    int sprite_w = sprite_h / 2;
-    if (sprite_w < 3) sprite_w = 3;
-
-    int draw_y0 = (int)(center_y - (float)sprite_h * 0.55f);
-    int draw_y1 = draw_y0 + sprite_h;
-    int draw_x0 = screen_x - sprite_w / 2;
-    int draw_x1 = screen_x + sprite_w / 2;
-
-    if (draw_y0 < 0) draw_y0 = 0;
-    if (draw_y1 >= RENDER_H) draw_y1 = RENDER_H - 1;
-    if (draw_x0 < 0) draw_x0 = 0;
-    if (draw_x1 >= RENDER_W) draw_x1 = RENDER_W - 1;
-    if (draw_x1 <= draw_x0 || draw_y1 <= draw_y0) return;
-
-    float shade = 1.0f / (1.0f + transform_y * 0.10f);
-    Color c = apply_dof_fade(shade_color(base, shade), transform_y);
-    Color edge = blend_color(c, (Color){255, 255, 255}, 0.25f);
-
-    for (int sx = draw_x0; sx <= draw_x1; sx++) {
-        if (transform_y >= zbuf[sx]) continue;
-        int px0 = sx * PIXEL_SCALE;
-        int px1 = px0 + PIXEL_SCALE;
-        int py0 = draw_y0 * PIXEL_SCALE;
-        int py1 = (draw_y1 + 1) * PIXEL_SCALE;
-        fill_rect_raw(fb, TOP_W, TOP_H, px0, py0, px1, py1, c);
-        if (sx == draw_x0 || sx == draw_x1) fill_rect_raw(fb, TOP_W, TOP_H, px0, py0, px1, py1, edge);
+static void reset_render_pixel_zbufs(void) {
+    for (int i = 0; i < RENDER_W * RENDER_H; i++) {
+        g_wall_pixel_zbuf[i] = 1.0e30f;
+        g_sprite_pixel_zbuf[i] = 1.0e30f;
     }
+}
+
+static void mark_wall_depth_rect(int x0, int x1, int y0, int y1, float depth) {
+    if (x0 < 0) x0 = 0;
+    if (x1 > RENDER_W) x1 = RENDER_W;
+    if (y0 < 0) y0 = 0;
+    if (y1 > RENDER_H) y1 = RENDER_H;
+    if (x1 <= x0 || y1 <= y0) return;
+
+    for (int y = y0; y < y1; y++) {
+        int base = y * RENDER_W;
+        for (int x = x0; x < x1; x++) {
+            float *d = &g_wall_pixel_zbuf[base + x];
+            if (depth < *d) *d = depth;
+        }
+    }
+}
+
+static bool sprite_pixel_can_draw(int sx, int sy, float depth) {
+    if (sx < 0 || sy < 0 || sx >= RENDER_W || sy >= RENDER_H) return false;
+    int idx = rz_index(sx, sy);
+
+    /* Walls/platforms/doors only occlude pixels they actually draw.
+       This prevents low platforms and transparent sprite space from hiding enemies. */
+    if (depth > g_wall_pixel_zbuf[idx] + 0.02f) return false;
+
+    /* Sprites occlude per-pixel, not per-column. This fixes coins/items turning their
+       transparent area into an invisible wall for enemies and NPCs behind them. */
+    if (depth > g_sprite_pixel_zbuf[idx] + 0.02f) return false;
+    return true;
+}
+
+static void mark_sprite_pixel_depth(int sx, int sy, float depth) {
+    if (sx < 0 || sy < 0 || sx >= RENDER_W || sy >= RENDER_H) return;
+    int idx = rz_index(sx, sy);
+    if (depth < g_sprite_pixel_zbuf[idx]) g_sprite_pixel_zbuf[idx] = depth;
+}
+
+
+static float current_render_depth(void) {
+    return clampf32(g_level_depth, 0.50f, 2.00f);
+}
+
+static float current_camera_z_scaled(void) {
+    return (g_level.player_z + EYE_HEIGHT) * current_render_depth();
+}
+
+static float sprite_base_z_at(float wx, float wy) {
+    if (g_render_angle_override) return 0.0f;
+    return ground_height_at(&g_level, wx, wy, PLATFORM_TOP);
+}
+
+static int project_world_z_to_render_y(float center_y, float transform_y, float world_z) {
+    if (transform_y < 0.001f) transform_y = 0.001f;
+    float proj = (float)RENDER_H / transform_y;
+    float depth = current_render_depth();
+    return (int)(center_y + (current_camera_z_scaled() - world_z * depth) * proj);
+}
+
+static bool world_text_visible_at(int sx, int sy, float depth) {
+    if (sx < 0 || sy < 0 || sx >= RENDER_W || sy >= RENDER_H) return false;
+    return depth <= g_wall_pixel_zbuf[rz_index(sx, sy)] + 0.05f;
+}
+
+static bool entity_in_front_and_near(float cam_x, float cam_y, float dir_x, float dir_y,
+                                     float wx, float wy, float max_dist2) {
+    float dx = wx - cam_x;
+    float dy = wy - cam_y;
+    float d2 = dx * dx + dy * dy;
+    if (d2 > max_dist2) return false;
+    float front = dx * dir_x + dy * dir_y;
+    return front > 0.04f;
 }
 
 static const uint8_t KEY_SPRITE_8X8[8] = {
@@ -146,7 +180,6 @@ static void draw_world_text_label(u8 *fb,
 
     int sx = (int)((RENDER_W * 0.5f) * (1.0f + transform_x / transform_y));
     if (sx < 0 || sx >= RENDER_W) return;
-    if (transform_y >= zbuf[sx]) return;
 
     int sprite_h = (int)fabsf((RENDER_H / transform_y) * height_scale * clampf32(g_level_depth, 0.50f, 2.00f));
     if (sprite_h < 8) sprite_h = 8;
@@ -161,8 +194,12 @@ static void draw_world_text_label(u8 *fb,
     buf[len] = '\0';
     if (len <= 0) return;
 
+    float base_z = sprite_base_z_at(wx, wy);
+    int label_y = project_world_z_to_render_y(center_y, transform_y, base_z) - sprite_h;
     int px = sx * PIXEL_SCALE;
-    int py = (int)((center_y - (float)sprite_h * 0.72f) * PIXEL_SCALE) - 10;
+    int py = label_y * PIXEL_SCALE - 4;
+    int text_ry = py / PIXEL_SCALE;
+    if (!world_text_visible_at(sx, text_ry, transform_y)) return;
     int tw = len * 4;
     int x0 = px - tw / 2 - 2;
     int y0 = py - 2;
@@ -172,6 +209,7 @@ static void draw_world_text_label(u8 *fb,
     if (y0 > TOP_H - 10) y0 = TOP_H - 10;
     fill_rect_raw(fb, TOP_W, TOP_H, x0, y0, x0 + tw + 4, y0 + 9, bg);
     draw_text3x5(fb, TOP_W, TOP_H, x0 + 2, y0 + 2, buf, fg, 1);
+    (void)zbuf;
 }
 
 static void draw_billboard_masked_sprite(u8 *fb,
@@ -179,7 +217,7 @@ static void draw_billboard_masked_sprite(u8 *fb,
                                          float dir_x, float dir_y,
                                          float plane_x, float plane_y,
                                          float center_y,
-                                         const float *zbuf,
+                                         float *zbuf,
                                          float sprite_x, float sprite_y,
                                          float height_scale,
                                          const uint8_t *mask8,
@@ -200,8 +238,9 @@ static void draw_billboard_masked_sprite(u8 *fb,
     if (sprite_h > RENDER_H) sprite_h = RENDER_H;
 
     int sprite_w = sprite_h;
-    int draw_y0 = (int)(center_y - (float)sprite_h * 0.40f);
-    int draw_y1 = draw_y0 + sprite_h;
+    float base_z = sprite_base_z_at(sprite_x, sprite_y);
+    int draw_y1 = project_world_z_to_render_y(center_y, transform_y, base_z);
+    int draw_y0 = draw_y1 - sprite_h;
     int draw_x0 = screen_x - sprite_w / 2;
     int draw_x1 = screen_x + sprite_w / 2;
 
@@ -223,12 +262,11 @@ static void draw_billboard_masked_sprite(u8 *fb,
         if (v > 7) v = 7;
 
         for (int sx = draw_x0; sx <= draw_x1; sx++) {
-            if (transform_y >= zbuf[sx]) continue;
-
             int u = ((sx - draw_x0) * 8) / w;
             if (u < 0) u = 0;
             if (u > 7) u = 7;
             if (!(mask8[v] & (uint8_t)(0x80u >> u))) continue;
+            if (!sprite_pixel_can_draw(sx, sy, transform_y)) continue;
 
             Color out = (v < 3 && u < 5) ? shine : c;
             int px0 = sx * PIXEL_SCALE;
@@ -236,8 +274,10 @@ static void draw_billboard_masked_sprite(u8 *fb,
             int py0 = sy * PIXEL_SCALE;
             int py1 = py0 + PIXEL_SCALE;
             fill_rect_raw(fb, TOP_W, TOP_H, px0, py0, px1, py1, out);
+            mark_sprite_pixel_depth(sx, sy, transform_y);
         }
     }
+    (void)zbuf;
 }
 
 
@@ -246,7 +286,7 @@ static void draw_enemy_sprite_with_hp(u8 *fb,
                                       float dir_x, float dir_y,
                                       float plane_x, float plane_y,
                                       float center_y,
-                                      const float *zbuf,
+                                      float *zbuf,
                                       const Enemy *e,
                                       Color base) {
     if (!e || !e->active) return;
@@ -261,14 +301,34 @@ static void draw_enemy_sprite_with_hp(u8 *fb,
     if (transform_y <= 0.08f) return;
 
     int screen_x = (int)((RENDER_W * 0.5f) * (1.0f + transform_x / transform_y));
-    int sprite_h = (int)fabsf((RENDER_H / transform_y) * 0.95f * clampf32(g_level_depth, 0.50f, 2.00f));
-    if (sprite_h < 8) sprite_h = 8;
-    if (sprite_h > RENDER_H * 2) sprite_h = RENDER_H * 2;
-    int sprite_w = sprite_h / 2;
-    if (sprite_w < 4) sprite_w = 4;
+    float hit_t = clampf32(e->hit_timer / 0.28f, 0.0f, 1.0f);
+    float death_t = e->dying ? clampf32(1.0f - (e->death_timer / 0.48f), 0.0f, 1.0f) : 0.0f;
+    if (hit_t > 0.0f) {
+        screen_x += (int)(sinf(hit_t * 32.0f) * 4.0f);
+    }
 
-    int draw_y0 = (int)(center_y - (float)sprite_h * 0.55f);
-    int draw_y1 = draw_y0 + sprite_h;
+    bool boss_sprite = (e->ai_rank == AI_RANK_BOSS);
+    int mask_w = boss_sprite ? BOSS_SPRITE_W : 8;
+    int mask_h = boss_sprite ? BOSS_SPRITE_H : 8;
+    float hscale = boss_sprite ? 1.58f : 0.95f;
+    float wscale = boss_sprite ? 1.00f : 1.0f;
+    if (e->dying) {
+        hscale *= (1.0f - death_t * 0.82f);
+        wscale += death_t * 1.10f;
+    } else if (hit_t > 0.0f) {
+        hscale *= (1.0f - hit_t * 0.16f);
+        wscale += hit_t * 0.26f;
+    }
+
+    int sprite_h = (int)fabsf((RENDER_H / transform_y) * hscale * clampf32(g_level_depth, 0.50f, 2.00f));
+    if (sprite_h < 3) sprite_h = 3;
+    if (sprite_h > RENDER_H * 2) sprite_h = RENDER_H * 2;
+    int sprite_w = boss_sprite ? (int)((float)sprite_h * 0.82f * wscale) : (int)((float)sprite_h * 0.50f * wscale);
+    if (sprite_w < (boss_sprite ? 8 : 4)) sprite_w = boss_sprite ? 8 : 4;
+
+    float base_z = sprite_base_z_at(e->x, e->y);
+    int draw_y1 = project_world_z_to_render_y(center_y, transform_y, base_z);
+    int draw_y0 = draw_y1 - sprite_h;
     int draw_x0 = screen_x - sprite_w / 2;
     int draw_x1 = screen_x + sprite_w / 2;
 
@@ -285,22 +345,26 @@ static void draw_enemy_sprite_with_hp(u8 *fb,
     int w = draw_x1 - draw_x0 + 1;
     int h = draw_y1 - draw_y0 + 1;
     for (int sy = draw_y0; sy <= draw_y1; sy++) {
-        int v = ((sy - draw_y0) * 8) / h;
+        int v = ((sy - draw_y0) * mask_h) / h;
         if (v < 0) v = 0;
-        if (v > 7) v = 7;
+        if (v >= mask_h) v = mask_h - 1;
         for (int sx = draw_x0; sx <= draw_x1; sx++) {
-            if (transform_y >= zbuf[sx]) continue;
-            int u = ((sx - draw_x0) * 8) / w;
+            int u = ((sx - draw_x0) * mask_w) / w;
             if (u < 0) u = 0;
-            if (u > 7) u = 7;
-            if (!(e->sprite[v] & (1 << (7 - u)))) continue;
+            if (u >= mask_w) u = mask_w - 1;
+            bool on = boss_sprite ? ((e->boss_sprite[v] & (uint16_t)(1u << (BOSS_SPRITE_W - 1 - u))) != 0)
+                                  : ((e->sprite[v] & (uint8_t)(1u << (7 - u))) != 0);
+            if (!on) continue;
+            if (!sprite_pixel_can_draw(sx, sy, transform_y)) continue;
             int px0 = sx * PIXEL_SCALE;
             int px1 = px0 + PIXEL_SCALE;
             int py0 = sy * PIXEL_SCALE;
             int py1 = py0 + PIXEL_SCALE;
             Color pc = c;
-            if (u == 0 || u == 7 || v == 0) pc = edge;
+            if (e->dying) pc = blend_color(pc, (Color){35, 20, 18}, death_t * 0.65f);
+            if (u == 0 || u == mask_w - 1 || v == 0) pc = edge;
             fill_rect_raw(fb, TOP_W, TOP_H, px0, py0, px1, py1, pc);
+            mark_sprite_pixel_depth(sx, sy, transform_y);
         }
     }
 
@@ -315,6 +379,309 @@ static void draw_enemy_sprite_with_hp(u8 *fb,
     fill_rect_raw(fb, TOP_W, TOP_H, bx0, by0, bx1, by0 + 3, (Color){35, 10, 10});
     int fill_w = ((bx1 - bx0) * hp) / hp_max;
     fill_rect_raw(fb, TOP_W, TOP_H, bx0, by0, bx0 + fill_w, by0 + 3, (Color){90, 255, 90});
+    (void)zbuf;
+}
+
+static void draw_slash_point(u8 *fb, int x, int y, Color core, Color glow, int thick) {
+    if (thick > 1) {
+        fill_rect_raw(fb, TOP_W, TOP_H, x - thick, y - thick, x + thick + 1, y + thick + 1, glow);
+    }
+    fill_rect_raw(fb, TOP_W, TOP_H, x, y, x + 2, y + 2, core);
+}
+
+
+static bool project_world_point_to_render(float cam_x, float cam_y,
+                                          float dir_x, float dir_y,
+                                          float plane_x, float plane_y,
+                                          float center_y,
+                                          float wx, float wy, float wz,
+                                          int *out_x, int *out_y, float *out_depth) {
+    float rx = wx - cam_x;
+    float ry = wy - cam_y;
+    float det = plane_x * dir_y - dir_x * plane_y;
+    if (fabsf(det) < 0.000001f) return false;
+
+    float inv_det = 1.0f / det;
+    float transform_x = inv_det * (dir_y * rx - dir_x * ry);
+    float transform_y = inv_det * (-plane_y * rx + plane_x * ry);
+    if (transform_y <= 0.08f) return false;
+
+    int sx = (int)((RENDER_W * 0.5f) * (1.0f + transform_x / transform_y));
+    int sy = project_world_z_to_render_y(center_y, transform_y, wz);
+    if (out_x) *out_x = sx;
+    if (out_y) *out_y = sy;
+    if (out_depth) *out_depth = transform_y;
+    return true;
+}
+
+static void draw_line_raw(u8 *fb, int x0, int y0, int x1, int y1, Color c) {
+    int dx = abs(x1 - x0);
+    int sx = x0 < x1 ? 1 : -1;
+    int dy = -abs(y1 - y0);
+    int sy = y0 < y1 ? 1 : -1;
+    int err = dx + dy;
+
+    for (;;) {
+        fill_rect_raw(fb, TOP_W, TOP_H, x0 - 1, y0 - 1, x0 + 2, y0 + 2, c);
+        if (x0 == x1 && y0 == y1) break;
+        int e2 = err * 2;
+        if (e2 >= dy) { err += dy; x0 += sx; }
+        if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+}
+
+static void draw_success_floor_marker(u8 *fb,
+                                      float cam_x, float cam_y,
+                                      float dir_x, float dir_y,
+                                      float plane_x, float plane_y,
+                                      float center_y,
+                                      float sx_world, float sy_world) {
+    float z = sprite_base_z_at(sx_world, sy_world) + 0.025f;
+    float x0 = floorf(sx_world);
+    float y0 = floorf(sy_world);
+    float x1 = x0 + 1.0f;
+    float y1 = y0 + 1.0f;
+
+    int px[4], py[4];
+    float d[4];
+    if (!project_world_point_to_render(cam_x, cam_y, dir_x, dir_y, plane_x, plane_y, center_y, x0, y0, z, &px[0], &py[0], &d[0])) return;
+    if (!project_world_point_to_render(cam_x, cam_y, dir_x, dir_y, plane_x, plane_y, center_y, x1, y0, z, &px[1], &py[1], &d[1])) return;
+    if (!project_world_point_to_render(cam_x, cam_y, dir_x, dir_y, plane_x, plane_y, center_y, x1, y1, z, &px[2], &py[2], &d[2])) return;
+    if (!project_world_point_to_render(cam_x, cam_y, dir_x, dir_y, plane_x, plane_y, center_y, x0, y1, z, &px[3], &py[3], &d[3])) return;
+
+    float center_depth = 0.0f;
+    int cxr = 0, cyr = 0;
+    if (!project_world_point_to_render(cam_x, cam_y, dir_x, dir_y, plane_x, plane_y, center_y, sx_world, sy_world, z, &cxr, &cyr, &center_depth)) return;
+    if (cxr < 0 || cxr >= RENDER_W || cyr < 0 || cyr >= RENDER_H) return;
+    if (!world_text_visible_at(cxr, cyr, center_depth)) return;
+
+    for (int i = 0; i < 4; i++) {
+        px[i] *= PIXEL_SCALE;
+        py[i] *= PIXEL_SCALE;
+    }
+
+    Color glow = (Color){20, 95, 35};
+    Color edge = (Color){95, 255, 115};
+    draw_line_raw(fb, px[0], py[0], px[1], py[1], edge);
+    draw_line_raw(fb, px[1], py[1], px[2], py[2], edge);
+    draw_line_raw(fb, px[2], py[2], px[3], py[3], edge);
+    draw_line_raw(fb, px[3], py[3], px[0], py[0], edge);
+    draw_line_raw(fb, px[0], py[0], px[2], py[2], glow);
+    draw_line_raw(fb, px[1], py[1], px[3], py[3], glow);
+}
+
+static void draw_billboard_masked_sprite_centered_z(u8 *fb,
+                                         float cam_x, float cam_y,
+                                         float dir_x, float dir_y,
+                                         float plane_x, float plane_y,
+                                         float center_y,
+                                         float *zbuf,
+                                         float sprite_x, float sprite_y,
+                                         float world_center_z,
+                                         float height_scale,
+                                         const uint8_t *mask8,
+                                         Color base) {
+    float rx = sprite_x - cam_x;
+    float ry = sprite_y - cam_y;
+    float det = plane_x * dir_y - dir_x * plane_y;
+    if (fabsf(det) < 0.000001f) return;
+
+    float inv_det = 1.0f / det;
+    float transform_x = inv_det * (dir_y * rx - dir_x * ry);
+    float transform_y = inv_det * (-plane_y * rx + plane_x * ry);
+    if (transform_y <= 0.08f) return;
+
+    int screen_x = (int)((RENDER_W * 0.5f) * (1.0f + transform_x / transform_y));
+    int sprite_h = (int)fabsf((RENDER_H / transform_y) * height_scale * clampf32(g_level_depth, 0.50f, 2.00f));
+    if (sprite_h < 5) sprite_h = 5;
+    if (sprite_h > RENDER_H) sprite_h = RENDER_H;
+
+    int sprite_w = sprite_h;
+    int center_screen_y = project_world_z_to_render_y(center_y, transform_y, world_center_z);
+    int draw_y0 = center_screen_y - sprite_h / 2;
+    int draw_y1 = center_screen_y + sprite_h / 2;
+    int draw_x0 = screen_x - sprite_w / 2;
+    int draw_x1 = screen_x + sprite_w / 2;
+
+    if (draw_y0 < 0) draw_y0 = 0;
+    if (draw_y1 >= RENDER_H) draw_y1 = RENDER_H - 1;
+    if (draw_x0 < 0) draw_x0 = 0;
+    if (draw_x1 >= RENDER_W) draw_x1 = RENDER_W - 1;
+    if (draw_x1 <= draw_x0 || draw_y1 <= draw_y0) return;
+
+    float shade = 1.0f / (1.0f + transform_y * 0.08f);
+    Color c = apply_dof_fade(shade_color(base, shade), transform_y);
+    Color shine = blend_color(c, (Color){255, 255, 255}, 0.40f);
+
+    int w = draw_x1 - draw_x0 + 1;
+    int h = draw_y1 - draw_y0 + 1;
+    for (int sy = draw_y0; sy <= draw_y1; sy++) {
+        int v = ((sy - draw_y0) * 8) / h;
+        if (v < 0) v = 0;
+        if (v > 7) v = 7;
+        for (int sx = draw_x0; sx <= draw_x1; sx++) {
+            int u = ((sx - draw_x0) * 8) / w;
+            if (u < 0) u = 0;
+            if (u > 7) u = 7;
+            if (!(mask8[v] & (uint8_t)(0x80u >> u))) continue;
+            if (!sprite_pixel_can_draw(sx, sy, transform_y)) continue;
+
+            Color out = (v < 3 && u < 5) ? shine : c;
+            int px0 = sx * PIXEL_SCALE;
+            int px1 = px0 + PIXEL_SCALE;
+            int py0 = sy * PIXEL_SCALE;
+            int py1 = py0 + PIXEL_SCALE;
+            fill_rect_raw(fb, TOP_W, TOP_H, px0, py0, px1, py1, out);
+            mark_sprite_pixel_depth(sx, sy, transform_y);
+        }
+    }
+    (void)zbuf;
+}
+
+static bool draw_raycast_column_slice(u8 *fb,
+                                      int x, int column_step,
+                                      float perp, uint8_t hit_tile, int side_hit,
+                                      int map_x, int map_y,
+                                      float ray_x, float ray_y,
+                                      float pos_x, float pos_y,
+                                      float cam_z, float center_y,
+                                      float depth,
+                                      int *prev_sy0, int *prev_sy1, Color *prev_c,
+                                      float *zbuf) {
+    if (!hit_tile || perp < 0.001f) return false;
+
+    float z0 = 0.0f;
+    float z1 = 1.0f;
+    if (hit_tile == PLATFORM_TILE) {
+        z0 = PLATFORM_BOTTOM;
+        z1 = PLATFORM_TOP;
+    } else if (hit_tile == TILE_DOOR) {
+        float open = door_open_fraction_at(map_x, map_y);
+        float lower = open * 1.12f;
+        z0 = -lower;
+        z1 = 1.0f - lower;
+        if (z1 <= -0.05f) return false;
+    }
+    z0 *= depth;
+    z1 *= depth;
+
+    float proj = (float)RENDER_H / perp;
+    int draw_start = (int)(center_y + (cam_z - z1) * proj);
+    int draw_end = (int)(center_y + (cam_z - z0) * proj);
+
+    if (draw_start < 0) draw_start = 0;
+    if (draw_end >= RENDER_H) draw_end = RENDER_H - 1;
+    if (draw_end <= draw_start) return false;
+
+    Color base = (hit_tile == TILE_DOOR) ? (Color){150, 100, 45} : WALL_COLORS[hit_tile & 7];
+    float shade = 1.0f / (1.0f + perp * 0.12f);
+    if (side_hit == 1) shade *= 0.72f;
+    if (hit_tile == PLATFORM_TILE) shade *= 0.95f;
+    if (hit_tile == TILE_DOOR) shade *= 1.08f;
+    Color c = apply_dof_fade(shade_color(base, shade), perp);
+
+    for (int zi = x; zi < x + column_step && zi < RENDER_W; zi++) {
+        if (perp < zbuf[zi]) zbuf[zi] = perp;
+    }
+    mark_wall_depth_rect(x, x + column_step, draw_start, draw_end + 1, perp);
+
+    int sx0 = x * PIXEL_SCALE;
+    int sx1 = sx0 + PIXEL_SCALE * column_step;
+    if (sx1 > TOP_W) sx1 = TOP_W;
+    int sy0 = draw_start * PIXEL_SCALE;
+    int sy1 = (draw_end + 1) * PIXEL_SCALE;
+    fill_rect_raw(fb, TOP_W, TOP_H, sx0, sy0, sx1, sy1, c);
+
+    if (hit_tile == TILE_DOOR) {
+        float wall_x = (side_hit == 0) ? (pos_y + perp * ray_y) : (pos_x + perp * ray_x);
+        wall_x -= floorf(wall_x);
+        int u = (int)(wall_x * 16.0f);
+        Color dark = apply_dof_fade(shade_color((Color){75, 42, 22}, shade), perp);
+        Color light = apply_dof_fade(shade_color((Color){205, 150, 78}, shade), perp);
+        if (u <= 1 || u >= 14 || u == 7 || u == 8) {
+            fill_rect_raw(fb, TOP_W, TOP_H, sx0, sy0, sx1, sy1, dark);
+        } else if (u == 3 || u == 12) {
+            fill_rect_raw(fb, TOP_W, TOP_H, sx0, sy0, sx1, sy1, light);
+        }
+        int h = sy1 - sy0;
+        if (h > 18) {
+            int r1 = sy0 + h / 3;
+            int r2 = sy0 + (h * 2) / 3;
+            fill_rect_raw(fb, TOP_W, TOP_H, sx0, r1, sx1, r1 + 2, dark);
+            fill_rect_raw(fb, TOP_W, TOP_H, sx0, r2, sx1, r2 + 2, dark);
+        }
+    }
+
+    draw_column_aa(fb, sx0, sx1, sy0, sy1, c, *prev_sy0, *prev_sy1, *prev_c);
+
+    if (hit_tile == PLATFORM_TILE) {
+        Color edge = c;
+        edge.r = (edge.r > 215) ? 255 : edge.r + 40;
+        edge.g = (edge.g > 215) ? 255 : edge.g + 40;
+        edge.b = (edge.b > 215) ? 255 : edge.b + 40;
+        fill_rect_raw(fb, TOP_W, TOP_H, sx0, sy0, sx1, sy0 + PIXEL_SCALE, edge);
+    }
+
+    *prev_sy0 = sy0;
+    *prev_sy1 = sy1;
+    *prev_c = c;
+    return true;
+}
+
+static void draw_crosshair_and_slash(u8 *fb) {
+    int cx = TOP_W / 2;
+    int cy = TOP_H / 2;
+
+    if (g_slash_timer > 0.0f && !g_render_angle_override) {
+        const float total = 0.26f;
+        float age = 1.0f - clampf32(g_slash_timer / total, 0.0f, 1.0f);
+        int head = (int)(age * 42.0f);
+        int tail = head - 18;
+        if (tail < 0) tail = 0;
+        if (head > 41) head = 41;
+
+        Color core = (Color){255, 248, 205};
+        Color mid = (Color){210, 188, 120};
+        Color glow = (Color){74, 58, 34};
+
+        for (int i = tail; i <= head; i++) {
+            float u = ((float)i) / 41.0f;
+            float k = sinf(u * PI_F);
+            int x = cx;
+            int y = cy;
+
+            switch (g_slash_type % 3) {
+                default:
+                case 0:
+                    /* Rising left-to-right cut, centered on the crosshair. */
+                    x = cx - 48 + (int)(u * 96.0f);
+                    y = cy + 34 - (int)(u * 68.0f) - (int)(k * 10.0f);
+                    break;
+                case 1:
+                    /* Falling left-to-right cut. */
+                    x = cx - 50 + (int)(u * 100.0f);
+                    y = cy - 36 + (int)(u * 72.0f) + (int)(k * 8.0f);
+                    break;
+                case 2:
+                    /* Short crescent sweep across the center. */
+                    x = cx - 42 + (int)(u * 84.0f);
+                    y = cy + (int)(cosf((u * 1.35f + 0.08f) * PI_F) * 26.0f);
+                    break;
+            }
+
+            /* Checker-skip the glow so it feels light/transparent instead of a solid block. */
+            int thick = ((i + g_slash_type) & 3) == 0 ? 2 : 1;
+            Color use_core = (i > head - 5) ? core : mid;
+            if (((i + g_slash_type) & 1) == 0) draw_slash_point(fb, x, y, use_core, glow, thick);
+            else fill_rect_raw(fb, TOP_W, TOP_H, x, y, x + 2, y + 2, use_core);
+        }
+    }
+
+    /* Draw the crosshair last so the slash never drags it right or covers it. */
+    fill_rect_raw(fb, TOP_W, TOP_H, cx - 9, cy - 1, cx + 10, cy + 2, (Color){20, 20, 20});
+    fill_rect_raw(fb, TOP_W, TOP_H, cx - 1, cy - 9, cx + 2, cy + 10, (Color){20, 20, 20});
+    fill_rect_raw(fb, TOP_W, TOP_H, cx - 7, cy, cx + 8, cy + 1, (Color){235, 235, 235});
+    fill_rect_raw(fb, TOP_W, TOP_H, cx, cy - 7, cx + 1, cy + 8, (Color){235, 235, 235});
 }
 
 static void render_raycast_eye(const Level *lv, gfx3dSide_t side, float eye_offset) {
@@ -362,6 +729,7 @@ static void render_raycast_eye(const Level *lv, gfx3dSide_t side, float eye_offs
     Color prev_c = {0, 0, 0};
     float zbuf[RENDER_W];
     for (int zi = 0; zi < RENDER_W; zi++) zbuf[zi] = 1.0e30f;
+    reset_render_pixel_zbufs();
 
     for (int x = 0; x < RENDER_W; x += column_step, ray_x += ray_step_x, ray_y += ray_step_y) {
         int map_x = (int)pos_x;
@@ -393,6 +761,11 @@ static void render_raycast_eye(const Level *lv, gfx3dSide_t side, float eye_offs
 
         uint8_t hit_tile = 0;
         int side_hit = 0;
+        bool platform_hit = false;
+        int platform_side = 0;
+        int platform_x = 0;
+        int platform_y = 0;
+        float platform_perp = 0.0f;
 
         for (int s = 0; s < max_steps; s++) {
             if (side_x < side_y) {
@@ -411,95 +784,59 @@ static void render_raycast_eye(const Level *lv, gfx3dSide_t side, float eye_offs
             }
 
             hit_tile = tiles[map_y * map_w + map_x] & MAX_TILE_ID;
+            if (hit_tile == PLATFORM_TILE) {
+                if (!platform_hit) {
+                    platform_hit = true;
+                    platform_side = side_hit;
+                    platform_x = map_x;
+                    platform_y = map_y;
+                    platform_perp = (side_hit == 0) ? (side_x - delta_x) : (side_y - delta_y);
+                    if (platform_perp < 0.001f) platform_perp = 0.001f;
+                }
+                hit_tile = 0;
+                continue;
+            }
             if (tile_blocks_raycast(hit_tile)) break;
             hit_tile = 0;
         }
 
-        if (!hit_tile) continue;
-
-        float perp = (side_hit == 0) ? (side_x - delta_x) : (side_y - delta_y);
-        if (perp < 0.001f) perp = 0.001f;
-        for (int zi = x; zi < x + column_step && zi < RENDER_W; zi++) zbuf[zi] = perp;
-
-        float z0 = 0.0f;
-        float z1 = 1.0f;
-        if (hit_tile == PLATFORM_TILE) {
-            z0 = PLATFORM_BOTTOM;
-            z1 = PLATFORM_TOP;
-        } else if (hit_tile == TILE_DOOR) {
-            float open = door_open_fraction_at(map_x, map_y);
-            float lower = open * 1.12f;
-            z0 = -lower;
-            z1 = 1.0f - lower;
-            if (z1 <= -0.05f) continue;
-        }
-        z0 *= depth;
-        z1 *= depth;
-
-        float proj = (float)RENDER_H / perp;
-        int draw_start = (int)(center_y + (cam_z - z1) * proj);
-        int draw_end = (int)(center_y + (cam_z - z0) * proj);
-
-        if (draw_start < 0) draw_start = 0;
-        if (draw_end >= RENDER_H) draw_end = RENDER_H - 1;
-        if (draw_end <= draw_start) continue;
-
-        Color base = (hit_tile == TILE_DOOR) ? (Color){150, 100, 45} : WALL_COLORS[hit_tile & 7];
-        float shade = 1.0f / (1.0f + perp * 0.12f);
-        if (side_hit == 1) shade *= 0.72f;
-        if (hit_tile == PLATFORM_TILE) shade *= 0.95f;
-        if (hit_tile == TILE_DOOR) shade *= 1.08f;
-        Color c = apply_dof_fade(shade_color(base, shade), perp);
-
-        int sx0 = x * PIXEL_SCALE;
-        int sx1 = sx0 + PIXEL_SCALE * column_step;
-        if (sx1 > TOP_W) sx1 = TOP_W;
-        int sy0 = draw_start * PIXEL_SCALE;
-        int sy1 = (draw_end + 1) * PIXEL_SCALE;
-        fill_rect_raw(fb, TOP_W, TOP_H, sx0, sy0, sx1, sy1, c);
-
-        if (hit_tile == TILE_DOOR) {
-            float wall_x = (side_hit == 0) ? (pos_y + perp * ray_y) : (pos_x + perp * ray_x);
-            wall_x -= floorf(wall_x);
-            int u = (int)(wall_x * 16.0f);
-            Color dark = apply_dof_fade(shade_color((Color){75, 42, 22}, shade), perp);
-            Color light = apply_dof_fade(shade_color((Color){205, 150, 78}, shade), perp);
-            if (u <= 1 || u >= 14 || u == 7 || u == 8) {
-                fill_rect_raw(fb, TOP_W, TOP_H, sx0, sy0, sx1, sy1, dark);
-            } else if (u == 3 || u == 12) {
-                fill_rect_raw(fb, TOP_W, TOP_H, sx0, sy0, sx1, sy1, light);
-            }
-            int h = sy1 - sy0;
-            if (h > 18) {
-                int r1 = sy0 + h / 3;
-                int r2 = sy0 + (h * 2) / 3;
-                fill_rect_raw(fb, TOP_W, TOP_H, sx0, r1, sx1, r1 + 2, dark);
-                fill_rect_raw(fb, TOP_W, TOP_H, sx0, r2, sx1, r2 + 2, dark);
-            }
+        float perp = 0.0f;
+        if (hit_tile) {
+            perp = (side_hit == 0) ? (side_x - delta_x) : (side_y - delta_y);
+            if (perp < 0.001f) perp = 0.001f;
         }
 
-        draw_column_aa(fb, sx0, sx1, sy0, sy1, c, prev_sy0, prev_sy1, prev_c);
+        if (!hit_tile && !platform_hit) continue;
 
-        if (hit_tile == PLATFORM_TILE) {
-            Color edge = c;
-            edge.r = (edge.r > 215) ? 255 : edge.r + 40;
-            edge.g = (edge.g > 215) ? 255 : edge.g + 40;
-            edge.b = (edge.b > 215) ? 255 : edge.b + 40;
-            fill_rect_raw(fb, TOP_W, TOP_H, sx0, sy0, sx1, sy0 + PIXEL_SCALE, edge);
+        /* Draw the far wall first, then overlay the nearer platform strip.
+           This keeps platforms visible while still allowing walls behind them to show. */
+        if (hit_tile) {
+            draw_raycast_column_slice(fb, x, column_step, perp, hit_tile, side_hit, map_x, map_y,
+                                      ray_x, ray_y, pos_x, pos_y, cam_z, center_y, depth,
+                                      &prev_sy0, &prev_sy1, &prev_c, zbuf);
         }
+        if (platform_hit) {
+            draw_raycast_column_slice(fb, x, column_step, platform_perp, PLATFORM_TILE, platform_side, platform_x, platform_y,
+                                      ray_x, ray_y, pos_x, pos_y, cam_z, center_y, depth,
+                                      &prev_sy0, &prev_sy1, &prev_c, zbuf);
+        }
+        continue;
 
-        prev_sy0 = sy0;
-        prev_sy1 = sy1;
-        prev_c = c;
     }
 
     if (!g_render_angle_override && !g_edit_mode) {
-        for (int ci = 0; ci < g_collectible_count; ci++) {
+        int item_budget = 0;
+        int npc_budget = 0;
+        int enemy_budget = 0;
+        for (int ci = 0; ci < g_collectible_count && item_budget < 18; ci++) {
             const Collectible *c = &g_collectibles[ci];
             if (!c->active) continue;
+            if (!entity_in_front_and_near(pos_x, pos_y, dir_x, dir_y, c->fx, c->fy, ITEM_RENDER_DIST2)) continue;
+            item_budget++;
             if (c->kind == REWARD_KEY) {
-                draw_billboard_masked_sprite(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, zbuf,
-                                             c->fx, c->fy, 0.42f, KEY_SPRITE_8X8, (Color){245, 205, 55});
+                float cz = sprite_base_z_at(c->fx, c->fy) + EYE_HEIGHT;
+                draw_billboard_masked_sprite_centered_z(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, zbuf,
+                                             c->fx, c->fy, cz, 0.42f, KEY_SPRITE_8X8, (Color){245, 205, 55});
             } else if (c->kind >= REWARD_WEAPON_BASE && c->kind < REWARD_WEAPON_BASE + MAX_WEAPONS) {
                 int wi = c->kind - REWARD_WEAPON_BASE;
                 Color wc = npc_color_for(g_weapons[wi].color_id);
@@ -510,17 +847,20 @@ static void render_raycast_eye(const Level *lv, gfx3dSide_t side, float eye_offs
             } else {
                 Color cc = (c->kind == REWARD_PINK) ? (Color){255, 105, 190} : ((c->kind == REWARD_PURPLE) ? (Color){175, 85, 255} : (Color){245, 205, 55});
                 float scale = (c->kind == REWARD_PURPLE) ? 0.34f : ((c->kind == REWARD_PINK) ? 0.30f : 0.26f);
-                draw_billboard_masked_sprite(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, zbuf,
-                                             c->fx, c->fy, scale, DOT_SPRITE_8X8, cc);
+                float cz = sprite_base_z_at(c->fx, c->fy) + EYE_HEIGHT;
+                draw_billboard_masked_sprite_centered_z(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, zbuf,
+                                             c->fx, c->fy, cz, scale, DOT_SPRITE_8X8, cc);
             }
         }
-        for (int ni = 0; ni < g_npc_count; ni++) {
+        for (int ni = 0; ni < g_npc_count && npc_budget < 10; ni++) {
             const NPC *n = &g_npcs[ni];
             if (!n->active) continue;
             const uint8_t *nsp = n->sprite;
             if (!nsp[0] && !nsp[1] && !nsp[2] && !nsp[3] && !nsp[4] && !nsp[5] && !nsp[6] && !nsp[7]) nsp = KEY_SPRITE_8X8;
             float nx = (float)n->x + 0.5f;
             float ny = (float)n->y + 0.5f;
+            if (!entity_in_front_and_near(pos_x, pos_y, dir_x, dir_y, nx, ny, NPC_RENDER_DIST2)) continue;
+            npc_budget++;
             draw_billboard_masked_sprite(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, zbuf,
                                          nx, ny, 0.82f, nsp, npc_color_for(n->color_id));
             float ndx = nx - pos_x;
@@ -528,45 +868,58 @@ static void render_raycast_eye(const Level *lv, gfx3dSide_t side, float eye_offs
             float nd2 = ndx * ndx + ndy * ndy;
             bool show_text = false;
             if (n->talk_timer > 0.0f) show_text = true;
-            else if (n->text_mode == TEXT_MODE_NEAR && nd2 <= 3.35f * 3.35f) show_text = true;
-            else if (n->text_mode == TEXT_MODE_ALWAYS && nd2 <= 5.50f * 5.50f) show_text = true;
+            else if (n->text_mode == TEXT_MODE_NEAR && nd2 <= 10.0f * 10.0f) show_text = true;
+            else if (n->text_mode == TEXT_MODE_ALWAYS && nd2 <= 16.0f * 16.0f) show_text = true;
             if (show_text) {
                 draw_world_text_label(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, zbuf,
-                                      nx, ny, 0.82f,
+                                      nx, ny, 0.65f,
                                       n->completed ? "THANKS" : n->text, (Color){245,245,245}, (Color){15,20,28});
             }
         }
         if (g_has_success) {
-            draw_billboard_sprite(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, zbuf,
-                                  g_success_x, g_success_y, 0.70f, (Color){70, 255, 100});
+            draw_success_floor_marker(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y,
+                                      g_success_x, g_success_y);
         }
-        for (int ei = 0; ei < g_enemy_count; ei++) {
+        for (int ei = 0; ei < g_enemy_count && enemy_budget < 20; ei++) {
             Enemy *e = &g_enemies[ei];
             if (!e->active) continue;
-            Color ec = e->state ? (Color){255, 75, 65} : npc_color_for(e->color_id);
+            if (!entity_in_front_and_near(pos_x, pos_y, dir_x, dir_y, e->x, e->y, ENEMY_RENDER_DIST2)) continue;
+            enemy_budget++;
+            Color ec = e->dying ? (Color){135, 70, 50} : (e->state ? (Color){255, 75, 65} : npc_color_for(e->color_id));
             draw_enemy_sprite_with_hp(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, zbuf, e, ec);
             const char *eline = NULL;
             float edx = e->x - pos_x;
             float edy = e->y - pos_y;
             float ed2 = edx * edx + edy * edy;
             bool enemy_text_near = ed2 <= 6.0f * 6.0f;
-            if (e->text_count > 0 && (e->text_timer > 0.0f || (e->state && enemy_text_near))) eline = e->text[e->text_index % e->text_count];
-            else if (e->state && enemy_text_near) eline = "!!!";
+            if (!e->dying && e->text_count > 0 && (e->text_timer > 0.0f || (e->state && enemy_text_near))) eline = e->text[e->text_index % e->text_count];
+            else if (!e->dying && e->state && enemy_text_near) eline = "!!!";
             if (eline && eline[0]) {
                 draw_world_text_label(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, zbuf,
-                                      e->x, e->y, 0.95f, eline, (Color){255,235,210}, (Color){35,8,8});
+                                      e->x, e->y, 0.74f, eline, (Color){255,235,210}, (Color){35,8,8});
             }
         }
     }
 
-    Color white = {225, 225, 225};
-    fill_rect_raw(fb, TOP_W, TOP_H, TOP_W / 2 - 6, TOP_H / 2, TOP_W / 2 + 7, TOP_H / 2 + 1, white);
-    fill_rect_raw(fb, TOP_W, TOP_H, TOP_W / 2, TOP_H / 2 - 6, TOP_W / 2 + 1, TOP_H / 2 + 7, white);
+    draw_crosshair_and_slash(fb);
 
     if (g_level_won && !g_render_angle_override) {
-        fill_rect_raw(fb, TOP_W, TOP_H, 102, 96, 298, 126, (Color){4, 35, 10});
-        draw_text3x5(fb, TOP_W, TOP_H, 130, 104, "SUCCESS", (Color){120,255,140}, 2);
-        if (g_random_play) draw_text3x5(fb, TOP_W, TOP_H, 124, 120, "A NEXT  START MENU", (Color){235,235,235}, 1);
+        char buf[64];
+        fill_rect_raw(fb, TOP_W, TOP_H, 78, 54, 322, 168, (Color){3, 20, 8});
+        fill_rect_raw(fb, TOP_W, TOP_H, 82, 58, 318, 164, (Color){8, 45, 18});
+        draw_text3x5(fb, TOP_W, TOP_H, 142, 64, "RESULTS", (Color){150,255,155}, 2);
+        snprintf(buf, sizeof(buf), "SCORE %d", g_player_score);
+        draw_text3x5(fb, TOP_W, TOP_H, 98, 86, buf, (Color){245,245,210}, 1);
+        snprintf(buf, sizeof(buf), "ENEMIES %d/%d", g_enemies_killed, g_enemies_total);
+        draw_text3x5(fb, TOP_W, TOP_H, 98, 98, buf, (Color){255,205,190}, 1);
+        snprintf(buf, sizeof(buf), "COINS BANK %d/%d", g_coins_bank, g_coins_total);
+        draw_text3x5(fb, TOP_W, TOP_H, 98, 110, buf, (Color){245,220,90}, 1);
+        snprintf(buf, sizeof(buf), "MISSIONS %d/%d", g_missions_done, g_missions_total);
+        draw_text3x5(fb, TOP_W, TOP_H, 98, 122, buf, (Color){190,225,255}, 1);
+        snprintf(buf, sizeof(buf), "TOTAL %d%%", g_success_percent);
+        draw_text3x5(fb, TOP_W, TOP_H, 98, 138, buf, (Color){180,255,180}, 2);
+        if (g_random_play) draw_text3x5(fb, TOP_W, TOP_H, 98, 156, "A NEXT  START MENU", (Color){235,235,235}, 1);
+        else draw_text3x5(fb, TOP_W, TOP_H, 98, 156, "START MENU", (Color){235,235,235}, 1);
     }
 
     if (g_render_world_hud) {
@@ -868,6 +1221,32 @@ static void draw_sprite_preview_grid(u8 *fb, int x0, int y0, const uint8_t *sp, 
     }
 }
 
+static void draw_boss_sprite_preview_grid(u8 *fb, int x0, int y0, const uint16_t *sp, Color c, int scale, int cx, int cy) {
+    if (!sp) return;
+    for (int y = 0; y < BOSS_SPRITE_H; y++) {
+        for (int x = 0; x < BOSS_SPRITE_W; x++) {
+            bool on = (sp[y] & (uint16_t)(1u << (BOSS_SPRITE_W - 1 - x))) != 0;
+            Color cell = on ? c : (Color){22, 24, 32};
+            fill_rect_raw(fb, BOT_W, BOT_H, x0 + x * scale, y0 + y * scale,
+                          x0 + (x + 1) * scale - 1, y0 + (y + 1) * scale - 1, cell);
+            if (x == cx && y == cy) {
+                fill_rect_raw(fb, BOT_W, BOT_H, x0 + x * scale, y0 + y * scale,
+                              x0 + (x + 1) * scale - 1, y0 + y * scale + 2, (Color){255,255,255});
+                fill_rect_raw(fb, BOT_W, BOT_H, x0 + x * scale, y0 + y * scale,
+                              x0 + x * scale + 2, y0 + (y + 1) * scale - 1, (Color){255,255,255});
+            }
+        }
+    }
+}
+
+static uint16_t *render_boss_sprite_pixels(void) {
+    if (g_sprite_edit_target == SPRITE_TARGET_BOSS) {
+        EnemyMeta *m = render_edit_enemy_meta();
+        return m ? m->boss_sprite : NULL;
+    }
+    return NULL;
+}
+
 static uint8_t *render_sprite_pixels(void) {
     if (g_sprite_edit_target == SPRITE_TARGET_NPC) {
         NPC *n = render_edit_npc();
@@ -887,7 +1266,7 @@ static uint8_t *render_sprite_pixels(void) {
 
 static uint8_t render_sprite_color_id(void) {
     if (g_sprite_edit_target == SPRITE_TARGET_NPC) { NPC *n = render_edit_npc(); return n ? n->color_id : 0; }
-    if (g_sprite_edit_target == SPRITE_TARGET_ENEMY) { EnemyMeta *m = render_edit_enemy_meta(); return m ? m->color_id : 0; }
+    if (g_sprite_edit_target == SPRITE_TARGET_ENEMY || g_sprite_edit_target == SPRITE_TARGET_BOSS) { EnemyMeta *m = render_edit_enemy_meta(); return m ? m->color_id : 0; }
     if (g_sprite_edit_target == SPRITE_TARGET_WEAPON) return g_weapons[clampi32(g_entity_edit_weapon, 0, MAX_WEAPONS - 1)].color_id;
     if (g_sprite_edit_target == SPRITE_TARGET_DEFAULT_NPC) return g_default_npc_color;
     return 0;
@@ -896,18 +1275,32 @@ static uint8_t render_sprite_color_id(void) {
 void render_sprite_editor(u8 *fb) {
     if (!fb) return;
     uint8_t *sp = render_sprite_pixels();
+    uint16_t *bsp = render_boss_sprite_pixels();
     fill_rect_raw(fb, BOT_W, BOT_H, 0, 0, BOT_W, BOT_H, (Color){7, 8, 14});
     fill_rect_raw(fb, BOT_W, BOT_H, 0, 0, BOT_W, 28, (Color){18, 24, 42});
-    draw_text3x5(fb, BOT_W, BOT_H, 8, 7, "SPRITE ART EDITOR", (Color){255,235,170}, 2);
-    if (!sp) { draw_text3x5(fb, BOT_W, BOT_H, 20, 50, "NO SPRITE", (Color){255,120,120}, 2); return; }
+    draw_text3x5(fb, BOT_W, BOT_H, 8, 7, bsp ? "BOSS 14X14 ART" : "SPRITE ART EDITOR", (Color){255,235,170}, 2);
+    if (!sp && !bsp) { draw_text3x5(fb, BOT_W, BOT_H, 20, 50, "NO SPRITE", (Color){255,120,120}, 2); return; }
     Color c = npc_color_for(render_sprite_color_id());
-    draw_sprite_preview_grid(fb, 96, 44, sp, c, 14, g_sprite_edit_cursor_x, g_sprite_edit_cursor_y);
+    if (bsp) draw_boss_sprite_preview_grid(fb, 104, 38, bsp, c, 10, g_sprite_edit_cursor_x, g_sprite_edit_cursor_y);
+    else draw_sprite_preview_grid(fb, 96, 44, sp, c, 14, g_sprite_edit_cursor_x, g_sprite_edit_cursor_y);
     draw_text3x5(fb, BOT_W, BOT_H, 22, 44, "D-PAD MOVE", (Color){210,210,210}, 1);
     draw_text3x5(fb, BOT_W, BOT_H, 22, 58, "A TOGGLE", (Color){210,210,210}, 1);
     draw_text3x5(fb, BOT_W, BOT_H, 22, 72, "L/R COLOR", (Color){210,210,210}, 1);
     draw_text3x5(fb, BOT_W, BOT_H, 22, 86, "Y PRESET", (Color){210,210,210}, 1);
     draw_text3x5(fb, BOT_W, BOT_H, 22, 100, "X CLEAR", (Color){210,210,210}, 1);
-    draw_text3x5(fb, BOT_W, BOT_H, 22, 226, "B BACK - ART SAVES IN BW3", (Color){190,200,220}, 1);
+    draw_text3x5(fb, BOT_W, BOT_H, 22, 114, bsp ? "14X14 BOSS ONLY" : "8X8 ENTITY ART", (Color){220,220,170}, 1);
+    draw_text3x5(fb, BOT_W, BOT_H, 22, 226, "B BACK - ART SAVES IN BW3/ENM4", (Color){190,200,220}, 1);
+}
+
+static const char *render_ai_rank_name(uint8_t rank) {
+    if (rank == AI_RANK_BOSS) return "BOSS";
+    if (rank == AI_RANK_CAPTAIN) return "CAPTAIN";
+    return "GRUNT";
+}
+
+static const char *render_ai_spawn_name(uint8_t kind) {
+    if (kind == AI_SPAWN_GRUNT) return "GRUNT";
+    return "NONE";
 }
 
 void render_entity_editor(u8 *fb) {
@@ -951,9 +1344,16 @@ void render_entity_editor(u8 *fb) {
         snprintf(buf, sizeof(buf), "%d", m->hp ? m->hp : 5); draw_entity_edit_row(fb, 1, "HEALTH", buf);
         snprintf(buf, sizeof(buf), "%d", m->attack ? m->attack : 1); draw_entity_edit_row(fb, 2, "ATTACK", buf);
         snprintf(buf, sizeof(buf), "%d", m->color_id & 7); draw_entity_edit_row(fb, 3, "COLOR", buf);
-        draw_entity_edit_row(fb, 4, "EDIT ART", "A OPEN");
-        draw_entity_edit_row(fb, 5, "DONE", "A CLOSE");
-        draw_sprite_preview_grid(fb, 270, 34, m->sprite, npc_color_for(m->color_id), 4, -1, -1);
+        draw_entity_edit_row(fb, 4, "AI RANK", render_ai_rank_name(m->ai_rank));
+        draw_entity_edit_row(fb, 5, "RANGED", m->ranged_attack ? "YES" : "NO");
+        snprintf(buf, sizeof(buf), "%d", m->spawn_limit); draw_entity_edit_row(fb, 6, "SPAWN MAX", buf);
+        draw_entity_edit_row(fb, 7, "SPAWN TYPE", render_ai_spawn_name(m->spawn_kind));
+        snprintf(buf, sizeof(buf), "%d", m->command_range ? m->command_range : 10); draw_entity_edit_row(fb, 8, "COMMAND RNG", buf);
+        draw_entity_edit_row(fb, 9, "EDIT 8X8", "A OPEN");
+        draw_entity_edit_row(fb, 10, "BOSS 14X14", "A OPEN");
+        draw_entity_edit_row(fb, 11, "DONE", "A CLOSE");
+        if (m->ai_rank == AI_RANK_BOSS) draw_boss_sprite_preview_grid(fb, 262, 34, m->boss_sprite, npc_color_for(m->color_id), 4, -1, -1);
+        else draw_sprite_preview_grid(fb, 270, 34, m->sprite, npc_color_for(m->color_id), 4, -1, -1);
     } else if (g_entity_edit_mode == EDIT_MODE_WEAPON) {
         int wi = clampi32(g_entity_edit_weapon, 0, MAX_WEAPONS - 1);
         WeaponDef *w = &g_weapons[wi];
