@@ -18,14 +18,18 @@ Level g_resize_temp;
 Enemy g_enemies[MAX_ENEMIES];
 Collectible g_collectibles[MAX_COLLECTIBLES];
 Door g_doors[MAX_DOORS];
+Projectile g_projectiles[MAX_PROJECTILES];
 NPC g_npcs[MAX_NPCS];
 EnemyMeta g_enemy_metas[MAX_ENEMIES];
 WeaponDef g_weapons[MAX_WEAPONS] = {
-    {"SWORD", 4, 1, 22, 0, {0x10,0x38,0x10,0x10,0x10,0x54,0x38,0x10}},
-    {"DAGGER", 2, 1, 10, 1, {0x08,0x1C,0x08,0x08,0x08,0x2A,0x1C,0x08}},
-    {"KNIFE", 2, 1, 8, 2, {0x00,0x18,0x18,0x18,0x3C,0x18,0x24,0x24}},
-    {"MACE", 6, 1, 32, 3, {0x18,0x3C,0x7E,0x18,0x18,0x18,0x24,0x24}},
-    {"MALLET", 8, 1, 42, 4, {0x7E,0x7E,0x18,0x18,0x18,0x18,0x24,0x24}}
+    {"SWORD", 3, 1, 20, 1, {0x10,0x18,0x18,0x10,0x10,0x54,0x38,0x10}},
+    {"DAGGER", 2, 1, 11, 2, {0x00,0x08,0x18,0x18,0x10,0x10,0x38,0x10}},
+    {"KNIFE", 2, 1, 14, 3, {0x04,0x0C,0x1C,0x18,0x10,0x10,0x30,0x20}},
+    {"MACE", 5, 1, 34, 5, {0x18,0x3C,0x18,0x18,0x18,0x18,0x18,0x10}},
+    {"MALLET", 7, 1, 46, 6, {0x7E,0x7E,0x18,0x18,0x18,0x18,0x18,0x10}},
+    {"AXE", 6, 1, 38, 4, {0x38,0x7C,0x58,0x18,0x18,0x18,0x18,0x10}},
+    {"SPEAR", 4, 2, 28, 7, {0x10,0x38,0x10,0x10,0x10,0x10,0x10,0x10}},
+    {"STAFF", 3, 3, 32, 0, {0x18,0x24,0x18,0x18,0x18,0x18,0x18,0x18}}
 };
 SlotInfo g_slots[SLOT_COUNT];
 
@@ -74,6 +78,7 @@ int g_enemy_count = 0;
 int g_collectible_count = 0;
 int g_collectibles_left = 0;
 int g_door_count = 0;
+int g_projectile_count = 0;
 int g_npc_count = 0;
 int g_enemy_meta_count = 0;
 int g_player_keys = 0;
@@ -85,10 +90,16 @@ int g_enemies_killed = 0;
 int g_missions_total = 0;
 int g_missions_done = 0;
 int g_success_percent = 0;
-bool g_player_weapons[MAX_WEAPONS] = { false, false, false, false, false };
+bool g_player_weapons[MAX_WEAPONS] = { false, false, false, false, false, false, false, false };
+int g_player_health = PLAYER_HEALTH_DEFAULT;
+int g_player_health_max = PLAYER_HEALTH_DEFAULT;
+bool g_player_dead = false;
+float g_player_hurt_timer = 0.0f;
+char g_death_killer[32] = "";
 int g_current_weapon = -1;
 float g_attack_cooldown = 0.0f;
 float g_slash_timer = 0.0f;
+float g_weapon_bounce_timer = 0.0f;
 int g_slash_type = 2;
 bool g_has_success = false;
 float g_success_x = 0.0f;
@@ -112,6 +123,10 @@ int g_entity_edit_y = 0;
 int g_entity_edit_weapon = 0;
 uint8_t g_default_npc_color = 0;
 uint8_t g_default_npc_sprite[SPRITE_BYTES] = {0x3C,0x7E,0xDB,0xFF,0x7E,0x3C,0x24,0x66};
+uint16_t g_default_npc_sprite16[ENEMY_SPRITE_ROWS] = {
+    0x0FF0,0x0FF0,0x3FFC,0x3FFC,0xF3CF,0xF3CF,0xFFFF,0xFFFF,
+    0x3FFC,0x3FFC,0x0FF0,0x0FF0,0x0C30,0x0C30,0x3C3C,0x3C3C
+};
 int g_sprite_edit_target = 0;
 int g_sprite_edit_cursor_x = 0;
 int g_sprite_edit_cursor_y = 0;
