@@ -44,7 +44,7 @@
 #define FOV_DEGREES 66.0f
 #define FOV_MIN_DEGREES 50.0f
 #define FOV_MAX_DEGREES 110.0f
-#define SETTINGS_ROW_COUNT 11
+#define SETTINGS_ROW_COUNT 12
 #define MOVE_SPEED 3.3f
 #define SPRINT_MULT 1.75f
 #define ROT_SPEED 2.35f
@@ -69,20 +69,31 @@
 #define MAX_ENEMIES 32
 #define MAX_COLLECTIBLES 160
 #define MAX_DOORS 128
+#define MAX_PROJECTILES 24
 #define MAX_NPCS 32
-#define MAX_WEAPONS 5
-#define NPC_TEXT_MAX 48
-#define ENEMY_TEXT_MAX 32
+#define MAX_WEAPONS 8
+#define NPC_TEXT_MAX 96
+#define ENEMY_TEXT_MAX 64
 #define ENEMY_TEXT_LINES 3
 #define SPRITE_BYTES 8
-#define BOSS_SPRITE_W 14
-#define BOSS_SPRITE_H 14
-#define BOSS_SPRITE_ROWS 14
+#define ENEMY_SPRITE_W 16
+#define ENEMY_SPRITE_H 16
+#define ENEMY_SPRITE_ROWS 16
+#define BOSS_SPRITE_W 32
+#define BOSS_SPRITE_H 32
+#define BOSS_SPRITE_ROWS 32
+#define BOSS_LEGACY_SPRITE_W 14
+#define BOSS_LEGACY_SPRITE_H 14
+#define BOSS_LEGACY_SPRITE_ROWS 14
 #define AI_RANK_GRUNT 0
 #define AI_RANK_CAPTAIN 1
 #define AI_RANK_BOSS 2
 #define AI_SPAWN_NONE 0
 #define AI_SPAWN_GRUNT 1
+#define TEXT_SPEED_INSTANT 0
+#define TEXT_SPEED_SLOW 1
+#define TEXT_SPEED_MEDIUM 2
+#define TEXT_SPEED_FAST 3
 #define MAX_RENDERED_SPRITES 32
 #define ITEM_RENDER_DIST2 (22.0f * 22.0f)
 #define NPC_RENDER_DIST2 (28.0f * 28.0f)
@@ -109,7 +120,16 @@
 #define REWARD_KEY 1
 #define REWARD_PINK 2
 #define REWARD_PURPLE 3
+#define REWARD_HEALTH 4
 #define REWARD_WEAPON_BASE 16
+#define PLAYER_HEALTH_DEFAULT 20
+#define PLAYER_HEALTH_MIN 1
+#define PLAYER_HEALTH_MAX 99
+#define HEALTH_PICKUP_AMOUNT 5
+#define ENEMY_HP_BAR_DIST2 (9.0f * 9.0f)
+#define PLAYER_HURT_TIME 0.75f
+#define BOSS_ARROW_SPEED 5.25f
+#define BOSS_ARROW_LIFE 2.20f
 #define WEAPON_SWORD 0
 #define WEAPON_DAGGER 1
 #define WEAPON_KNIFE 2
@@ -179,16 +199,20 @@ typedef struct {
     uint8_t text_index;
     uint8_t color_id;
     uint8_t sprite[SPRITE_BYTES];
+    uint16_t sprite16[ENEMY_SPRITE_ROWS];
     float text_timer;
     uint8_t ai_rank;
     uint8_t spawn_kind;
     uint8_t spawn_limit;
     uint8_t command_range;
     uint8_t ranged_attack;
+    uint8_t speed_attr;
+    uint8_t size_pct;
+    uint8_t text_speed;
     float spawn_timer;
     float ranged_timer;
     int parent_index;
-    uint16_t boss_sprite[BOSS_SPRITE_ROWS];
+    uint32_t boss_sprite[BOSS_SPRITE_ROWS];
     char text[ENEMY_TEXT_LINES][ENEMY_TEXT_MAX];
 } Enemy;
 
@@ -197,6 +221,7 @@ typedef struct {
     int x, y;
     float fx, fy;
     int kind;
+    int amount;
 } Collectible;
 
 typedef struct {
@@ -206,19 +231,31 @@ typedef struct {
     float open_t;
 } Door;
 
+typedef struct {
+    bool active;
+    float x, y, z;
+    float vx, vy;
+    float life;
+    int damage;
+    char killer[24];
+} Projectile;
+
 
 typedef struct {
     bool active;
     int x, y;
     uint8_t color_id;
     uint8_t text_mode;
-    uint8_t sprite[SPRITE_BYTES];
+    uint8_t text_speed;
+    uint8_t sprite[SPRITE_BYTES];       /* legacy 8x8 NPC art for older saves */
+    uint16_t sprite16[ENEMY_SPRITE_ROWS]; /* primary 16x16 NPC art */
     float talk_timer;
     uint8_t quest_type;
     uint16_t quest_target;
     uint8_t reward_kind;
     uint16_t reward_amount;
     bool completed;
+    bool known;
     char text[NPC_TEXT_MAX];
 } NPC;
 
@@ -229,18 +266,22 @@ typedef struct {
     uint8_t attack;
     uint8_t color_id;
     uint8_t sprite[SPRITE_BYTES];
+    uint16_t sprite16[ENEMY_SPRITE_ROWS];
     uint8_t ai_rank;
     uint8_t spawn_kind;
     uint8_t spawn_limit;
     uint8_t command_range;
     uint8_t ranged_attack;
-    uint16_t boss_sprite[BOSS_SPRITE_ROWS];
+    uint8_t speed_attr;
+    uint8_t size_pct;
+    uint8_t text_speed;
+    uint32_t boss_sprite[BOSS_SPRITE_ROWS];
     uint8_t text_count;
     char text[ENEMY_TEXT_LINES][ENEMY_TEXT_MAX];
 } EnemyMeta;
 
 typedef struct {
-    char name[12];
+    char name[16];
     uint8_t damage;
     uint8_t range;
     uint8_t cooldown;
@@ -278,6 +319,7 @@ extern Level g_resize_temp;
 extern Enemy g_enemies[MAX_ENEMIES];
 extern Collectible g_collectibles[MAX_COLLECTIBLES];
 extern Door g_doors[MAX_DOORS];
+extern Projectile g_projectiles[MAX_PROJECTILES];
 extern NPC g_npcs[MAX_NPCS];
 extern EnemyMeta g_enemy_metas[MAX_ENEMIES];
 extern WeaponDef g_weapons[MAX_WEAPONS];
@@ -327,6 +369,7 @@ extern int g_enemy_count;
 extern int g_collectible_count;
 extern int g_collectibles_left;
 extern int g_door_count;
+extern int g_projectile_count;
 extern int g_npc_count;
 extern int g_enemy_meta_count;
 extern int g_player_keys;
@@ -339,9 +382,15 @@ extern int g_missions_total;
 extern int g_missions_done;
 extern int g_success_percent;
 extern bool g_player_weapons[MAX_WEAPONS];
+extern int g_player_health;
+extern int g_player_health_max;
+extern bool g_player_dead;
+extern float g_player_hurt_timer;
+extern char g_death_killer[32];
 extern int g_current_weapon;
 extern float g_attack_cooldown;
 extern float g_slash_timer;
+extern float g_weapon_bounce_timer;
 extern int g_slash_type;
 extern bool g_has_success;
 extern float g_success_x;
@@ -365,6 +414,7 @@ extern int g_entity_edit_y;
 extern int g_entity_edit_weapon;
 extern uint8_t g_default_npc_color;
 extern uint8_t g_default_npc_sprite[SPRITE_BYTES];
+extern uint16_t g_default_npc_sprite16[ENEMY_SPRITE_ROWS];
 extern int g_sprite_edit_target;
 extern int g_sprite_edit_cursor_x;
 extern int g_sprite_edit_cursor_y;
@@ -473,6 +523,8 @@ EnemyMeta *enemy_meta_ensure_at(int x, int y);
 void randomize_weapon_stats(uint32_t seed);
 const char *weapon_name(int weapon);
 void copy_default_sprite(uint8_t *dst, int kind);
+void copy_default_enemy_sprite16(uint16_t *dst);
+void copy_default_boss_sprite(uint32_t *dst);
 void open_sprite_editor(int target);
 void handle_sprite_edit_input(u32 kDown);
 void render_sprite_editor(u8 *fb);
