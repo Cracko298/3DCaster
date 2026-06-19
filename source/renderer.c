@@ -50,6 +50,14 @@ static void draw_column_aa(u8 *fb, int sx0, int sx1, int sy0, int sy1, Color c,
 
 
 
+
+static bool project_world_point_to_render(float cam_x, float cam_y,
+                                          float dir_x, float dir_y,
+                                          float plane_x, float plane_y,
+                                          float center_y,
+                                          float wx, float wy, float wz,
+                                          int *out_x, int *out_y, float *out_depth);
+
 static float g_wall_pixel_zbuf[RENDER_W * RENDER_H];
 static float g_sprite_pixel_zbuf[RENDER_W * RENDER_H];
 
@@ -100,6 +108,27 @@ static void mark_sprite_pixel_depth(int sx, int sy, float depth) {
     if (depth < g_sprite_pixel_zbuf[idx]) g_sprite_pixel_zbuf[idx] = depth;
 }
 
+static void mark_sprite_depth_rect_pixels(int x0, int y0, int x1, int y1, float depth) {
+    /* Text labels are foreground UI attached to the entity, not part of the
+       entity shadow. Mark their render-space pixels so later shadows cannot
+       dither over the letters/background and look like the shadow is following
+       the text box. */
+    int rx0 = x0 / PIXEL_SCALE;
+    int ry0 = y0 / PIXEL_SCALE;
+    int rx1 = (x1 + PIXEL_SCALE - 1) / PIXEL_SCALE;
+    int ry1 = (y1 + PIXEL_SCALE - 1) / PIXEL_SCALE;
+    if (rx0 < 0) rx0 = 0;
+    if (ry0 < 0) ry0 = 0;
+    if (rx1 > RENDER_W) rx1 = RENDER_W;
+    if (ry1 > RENDER_H) ry1 = RENDER_H;
+    if (rx1 <= rx0 || ry1 <= ry0) return;
+    for (int y = ry0; y < ry1; y++) {
+        for (int x = rx0; x < rx1; x++) {
+            mark_sprite_pixel_depth(x, y, depth);
+        }
+    }
+}
+
 
 static float current_render_depth(void) {
     return clampf32(g_level_depth, 0.50f, 2.00f);
@@ -108,6 +137,7 @@ static float current_render_depth(void) {
 static float current_camera_z_scaled(void) {
     return (g_level.player_z + EYE_HEIGHT) * current_render_depth();
 }
+
 
 static float sprite_base_z_at(float wx, float wy) {
     if (g_render_angle_override) return 0.0f;
@@ -136,6 +166,58 @@ static bool entity_in_front_and_near(float cam_x, float cam_y, float dir_x, floa
     return front > 0.04f;
 }
 
+
+static float mask8_visible_width_ratio(const uint8_t *mask8) {
+    if (!mask8) return 1.0f;
+    int min_u = 8;
+    int max_u = -1;
+    for (int y = 0; y < 8; y++) {
+        uint8_t row = mask8[y];
+        for (int u = 0; u < 8; u++) {
+            if (row & (uint8_t)(0x80u >> u)) {
+                if (u < min_u) min_u = u;
+                if (u > max_u) max_u = u;
+            }
+        }
+    }
+    if (max_u < min_u) return 1.0f;
+    return clampf32(((float)(max_u - min_u + 1)) / 8.0f, 0.20f, 1.0f);
+}
+
+static float mask16_visible_width_ratio(const uint16_t *mask16) {
+    if (!mask16) return 1.0f;
+    int min_u = ENEMY_SPRITE_W;
+    int max_u = -1;
+    for (int y = 0; y < ENEMY_SPRITE_H; y++) {
+        uint16_t row = mask16[y];
+        for (int u = 0; u < ENEMY_SPRITE_W; u++) {
+            if (row & (uint16_t)(1u << (ENEMY_SPRITE_W - 1 - u))) {
+                if (u < min_u) min_u = u;
+                if (u > max_u) max_u = u;
+            }
+        }
+    }
+    if (max_u < min_u) return 1.0f;
+    return clampf32(((float)(max_u - min_u + 1)) / (float)ENEMY_SPRITE_W, 0.20f, 1.0f);
+}
+
+static float mask32_visible_width_ratio(const uint32_t *mask32) {
+    if (!mask32) return 1.0f;
+    int min_u = BOSS_SPRITE_W;
+    int max_u = -1;
+    for (int y = 0; y < BOSS_SPRITE_H; y++) {
+        uint32_t row = mask32[y];
+        for (int u = 0; u < BOSS_SPRITE_W; u++) {
+            if (row & (uint32_t)(1u << (BOSS_SPRITE_W - 1 - u))) {
+                if (u < min_u) min_u = u;
+                if (u > max_u) max_u = u;
+            }
+        }
+    }
+    if (max_u < min_u) return 1.0f;
+    return clampf32(((float)(max_u - min_u + 1)) / (float)BOSS_SPRITE_W, 0.20f, 1.0f);
+}
+
 static const uint8_t KEY_SPRITE_8X8[8] = {
     0x1C, 0x22, 0x22, 0x1C, 0x08, 0x0E, 0x08, 0x0C
 };
@@ -144,16 +226,109 @@ static const uint8_t DOT_SPRITE_8X8[8] = {
     0x00, 0x18, 0x3C, 0x7E, 0x7E, 0x3C, 0x18, 0x00
 };
 
-static const uint8_t WEAPON_SPRITE_8X8[8] = {
-    0x10, 0x38, 0x10, 0x10, 0x10, 0x54, 0x38, 0x10
+static const uint8_t HEART_SPRITE_8X8[8] = {
+    0x00, 0x66, 0xFF, 0xFF, 0x7E, 0x3C, 0x18, 0x00
 };
 
-static Color npc_color_for(uint8_t id) {
-    static const Color colors[8] = {
-        {80, 210, 255}, {255, 120, 180}, {120, 255, 120}, {255, 220, 90},
-        {170, 120, 255}, {255, 120, 80}, {120, 220, 210}, {235, 235, 235}
-    };
-    return colors[id & 7];
+static const uint8_t ARROW_SPRITE_8X8[8] = {
+    0x10, 0x18, 0x1C, 0xFE, 0xFE, 0x1C, 0x18, 0x10
+};
+
+static int typed_visible_len(const char *text, uint8_t speed, float elapsed) {
+    if (!text || !text[0]) return 0;
+    int len = 0;
+    while (text[len] && len < 180) len++;
+    if (speed == TEXT_SPEED_INSTANT) return len;
+    if (elapsed >= 99.0f) return len;
+    float cps = 14.0f;
+    if (speed == TEXT_SPEED_SLOW) cps = 7.0f;
+    else if (speed == TEXT_SPEED_MEDIUM) cps = 14.0f;
+    else if (speed == TEXT_SPEED_FAST) cps = 28.0f;
+    int shown = (int)(elapsed * cps) + 1;
+    if (shown < 1) shown = 1;
+    if (shown > len) shown = len;
+    return shown;
+}
+
+static void make_typed_text(char *out, size_t out_size, const char *text, uint8_t speed, float elapsed) {
+    if (!out || out_size == 0) return;
+    out[0] = '\0';
+    if (!text) return;
+    int n = typed_visible_len(text, speed, elapsed);
+    if (n >= (int)out_size) n = (int)out_size - 1;
+    memcpy(out, text, (size_t)n);
+    out[n] = '\0';
+}
+
+static int wrap_world_text(const char *text, char lines[6][25], int *widest) {
+    if (widest) *widest = 0;
+    for (int i = 0; i < 6; i++) lines[i][0] = '\0';
+    if (!text || !text[0]) return 0;
+
+    int line = 0;
+    int pos = 0;
+    int last_space = -1;
+    int src_line_start = 0;
+    char cur[25];
+    cur[0] = '\0';
+
+    for (int i = 0; text[i] && line < 6; i++) {
+        char ch = text[i];
+        if (ch == '|') ch = '\n';
+        if (ch == '\r') continue;
+
+        if (ch == '\n') {
+            cur[pos] = '\0';
+            snprintf(lines[line], 25, "%s", cur);
+            if (widest && pos > *widest) *widest = pos;
+            line++;
+            pos = 0;
+            last_space = -1;
+            src_line_start = i + 1;
+            cur[0] = '\0';
+            continue;
+        }
+
+        if (pos < 24) {
+            cur[pos++] = ch;
+            cur[pos] = '\0';
+            if (ch == ' ') last_space = pos - 1;
+            continue;
+        }
+
+        int break_pos = (last_space >= 8) ? last_space : 24;
+        char out[25];
+        memcpy(out, cur, (size_t)break_pos);
+        out[break_pos] = '\0';
+        while (break_pos > 0 && out[break_pos - 1] == ' ') out[--break_pos] = '\0';
+        snprintf(lines[line], 25, "%s", out);
+        if (widest && break_pos > *widest) *widest = break_pos;
+        line++;
+        if (line >= 4) break;
+
+        int carry_start = (last_space >= 8) ? (last_space + 1) : 24;
+        int carry_len = pos - carry_start;
+        if (carry_len < 0) carry_len = 0;
+        if (carry_len > 23) carry_len = 23;
+        memmove(cur, cur + carry_start, (size_t)carry_len);
+        pos = carry_len;
+        cur[pos++] = ch;
+        if (pos > 24) pos = 24;
+        cur[pos] = '\0';
+        last_space = -1;
+        for (int k = 0; k < pos; k++) if (cur[k] == ' ') last_space = k;
+        src_line_start = i;
+        (void)src_line_start;
+    }
+
+    if (line < 6 && pos > 0) {
+        cur[pos] = '\0';
+        snprintf(lines[line], 25, "%s", cur);
+        if (widest && pos > *widest) *widest = pos;
+        line++;
+    }
+
+    return line;
 }
 
 static void draw_world_text_label(u8 *fb,
@@ -185,14 +360,10 @@ static void draw_world_text_label(u8 *fb,
     if (sprite_h < 8) sprite_h = 8;
     if (sprite_h > RENDER_H * 2) sprite_h = RENDER_H * 2;
 
-    char buf[24];
-    int len = 0;
-    while (text[len] && len < (int)sizeof(buf) - 1) {
-        buf[len] = text[len];
-        len++;
-    }
-    buf[len] = '\0';
-    if (len <= 0) return;
+    char lines[6][25];
+    int widest = 0;
+    int line_count = wrap_world_text(text, lines, &widest);
+    if (line_count <= 0 || widest <= 0) return;
 
     float base_z = sprite_base_z_at(wx, wy);
     int label_y = project_world_z_to_render_y(center_y, transform_y, base_z) - sprite_h;
@@ -200,16 +371,54 @@ static void draw_world_text_label(u8 *fb,
     int py = label_y * PIXEL_SCALE - 4;
     int text_ry = py / PIXEL_SCALE;
     if (!world_text_visible_at(sx, text_ry, transform_y)) return;
-    int tw = len * 4;
-    int x0 = px - tw / 2 - 2;
-    int y0 = py - 2;
+
+    int tw = widest * 4;
+    int th = line_count * 7;
+    int x0 = px - tw / 2 - 3;
+    int y0 = py - th - 2;
     if (x0 < 0) x0 = 0;
-    if (x0 + tw + 4 > TOP_W) x0 = TOP_W - tw - 4;
+    if (x0 + tw + 6 > TOP_W) x0 = TOP_W - tw - 6;
     if (y0 < 2) y0 = 2;
-    if (y0 > TOP_H - 10) y0 = TOP_H - 10;
-    fill_rect_raw(fb, TOP_W, TOP_H, x0, y0, x0 + tw + 4, y0 + 9, bg);
-    draw_text3x5(fb, TOP_W, TOP_H, x0 + 2, y0 + 2, buf, fg, 1);
+    if (y0 > TOP_H - th - 4) y0 = TOP_H - th - 4;
+
+    fill_rect_raw(fb, TOP_W, TOP_H, x0, y0, x0 + tw + 6, y0 + th + 4, bg);
+    for (int li = 0; li < line_count; li++) {
+        draw_text3x5(fb, TOP_W, TOP_H, x0 + 3, y0 + 2 + li * 7, lines[li], fg, 1);
+    }
+    mark_sprite_depth_rect_pixels(x0, y0, x0 + tw + 6, y0 + th + 4, transform_y);
     (void)zbuf;
+}
+
+static void draw_world_text_label_typed(u8 *fb,
+                                        float cam_x, float cam_y,
+                                        float dir_x, float dir_y,
+                                        float plane_x, float plane_y,
+                                        float center_y,
+                                        const float *zbuf,
+                                        float wx, float wy,
+                                        float height_scale,
+                                        const char *text,
+                                        uint8_t speed,
+                                        float elapsed,
+                                        Color fg,
+                                        Color bg) {
+    char tmp[192];
+    make_typed_text(tmp, sizeof(tmp), text, speed, elapsed);
+    draw_world_text_label(fb, cam_x, cam_y, dir_x, dir_y, plane_x, plane_y,
+                          center_y, zbuf, wx, wy, height_scale, tmp, fg, bg);
+}
+
+
+static const uint8_t WEAPON_SPRITE_8X8[8] = {
+    0x10, 0x38, 0x10, 0x10, 0x10, 0x54, 0x38, 0x10
+};
+
+static Color npc_color_for(uint8_t id) {
+    static const Color colors[8] = {
+        {80, 210, 255}, {255, 120, 180}, {120, 255, 120}, {255, 220, 90},
+        {170, 120, 255}, {255, 120, 80}, {120, 220, 210}, {235, 235, 235}
+    };
+    return colors[id & 7];
 }
 
 static void draw_billboard_masked_sprite(u8 *fb,
@@ -235,7 +444,7 @@ static void draw_billboard_masked_sprite(u8 *fb,
     int screen_x = (int)((RENDER_W * 0.5f) * (1.0f + transform_x / transform_y));
     int sprite_h = (int)fabsf((RENDER_H / transform_y) * height_scale * clampf32(g_level_depth, 0.50f, 2.00f));
     if (sprite_h < 5) sprite_h = 5;
-    if (sprite_h > RENDER_H) sprite_h = RENDER_H;
+    if (sprite_h > 56) sprite_h = 56;
 
     int sprite_w = sprite_h;
     float base_z = sprite_base_z_at(sprite_x, sprite_y);
@@ -281,6 +490,136 @@ static void draw_billboard_masked_sprite(u8 *fb,
 }
 
 
+static void draw_ground_shadow(u8 *fb,
+                               float cam_x, float cam_y,
+                               float dir_x, float dir_y,
+                               float plane_x, float plane_y,
+                               float center_y,
+                               float wx, float wy,
+                               float world_z,
+                               float sprite_height_scale,
+                               float sprite_width_ratio) {
+    int sx, sy;
+    float depth;
+    /* Project the shadow as a floor decal at the entity base, not as a
+       screen-space blob attached to the text/sprite rectangle. */
+    if (!project_world_point_to_render(cam_x, cam_y, dir_x, dir_y, plane_x, plane_y,
+                                       center_y, wx, wy, world_z + 0.006f, &sx, &sy, &depth)) return;
+    if (sx < -40 || sx >= RENDER_W + 40 || sy < -20 || sy >= RENDER_H + 24) return;
+
+    if (sprite_height_scale <= 0.0f) sprite_height_scale = 0.25f;
+    if (sprite_width_ratio <= 0.0f) sprite_width_ratio = 1.0f;
+
+    int projected_h = (int)fabsf((RENDER_H / depth) * sprite_height_scale * clampf32(g_level_depth, 0.50f, 2.00f));
+    if (projected_h < 2) projected_h = 2;
+    if (projected_h > 72) projected_h = 72;
+
+    /* Width is based on the visible opaque sprite columns supplied by the
+       caller, then enlarged slightly so it reads as a soft contact shadow. */
+    int visible_w = (int)((float)projected_h * sprite_width_ratio + 0.5f);
+    int diameter = (int)((float)visible_w * 1.28f + 0.5f);
+    if (diameter < 4) diameter = 4;
+    if (diameter > 60) diameter = 60;
+
+    int rx_max = diameter / 2;
+    int ry_max = rx_max / 3;
+    if (ry_max < 1) ry_max = 1;
+    if (ry_max > 9) ry_max = 9;
+
+    /* Put the decal slightly below the foot point so it feels stuck to the
+       floor rather than hovering in the middle of the sprite. */
+    int center_sy = sy + (ry_max / 2);
+    Color dark = {10, 8, 7};
+    Color soft = {6, 5, 5};
+
+    for (int yy = -ry_max; yy <= ry_max; yy++) {
+        int py = center_sy + yy;
+        if (py < 0 || py >= RENDER_H) continue;
+        float ny = (float)yy / (float)ry_max;
+        for (int xx = -rx_max; xx <= rx_max; xx++) {
+            int px = sx + xx;
+            if (px < 0 || px >= RENDER_W) continue;
+            float nx = (float)xx / (float)rx_max;
+            float ed = nx * nx + ny * ny;
+            if (ed > 1.0f) continue;
+
+            int idx = rz_index(px, py);
+            /* Decal rule: never draw onto pixels already occupied by walls,
+               platforms, doors, text, or rendered sprite pixels.  This keeps
+               shadows on the visible floor only. */
+            if (g_wall_pixel_zbuf[idx] < 1.0e29f) continue;
+            if (g_sprite_pixel_zbuf[idx] < 1.0e29f) continue;
+
+            /* Transparent/dithered: dense at contact center, sparse near edge. */
+            if (ed > 0.25f && (((px + py) & 1) != 0)) continue;
+            if (ed > 0.62f && (((px ^ (py * 3)) & 3) != 0)) continue;
+
+            Color sh = (ed < 0.28f) ? dark : soft;
+            fill_rect_raw(fb, TOP_W, TOP_H, px * PIXEL_SCALE, py * PIXEL_SCALE,
+                          px * PIXEL_SCALE + PIXEL_SCALE, py * PIXEL_SCALE + PIXEL_SCALE, sh);
+        }
+    }
+}
+
+
+static void draw_billboard_masked_sprite16_centered_z(u8 *fb,
+                                                       float cam_x, float cam_y,
+                                                       float dir_x, float dir_y,
+                                                       float plane_x, float plane_y,
+                                                       float center_y,
+                                                       float *zbuf,
+                                                       float wx, float wy, float wz,
+                                                       float scale,
+                                                       const uint16_t *mask16,
+                                                       Color color) {
+    (void)zbuf;
+    if (!mask16) return;
+    float rx = wx - cam_x;
+    float ry = wy - cam_y;
+    float det = plane_x * dir_y - dir_x * plane_y;
+    if (fabsf(det) < 0.000001f) return;
+    float inv_det = 1.0f / det;
+    float transform_x = inv_det * (dir_y * rx - dir_x * ry);
+    float transform_y = inv_det * (-plane_y * rx + plane_x * ry);
+    if (transform_y <= 0.08f) return;
+    int screen_x = (int)((RENDER_W * 0.5f) * (1.0f + transform_x / transform_y));
+    int center_screen_y = project_world_z_to_render_y(center_y, transform_y, wz);
+    int sprite_h = (int)fabsf((RENDER_H / transform_y) * scale * clampf32(g_level_depth, 0.50f, 2.00f));
+    if (sprite_h < 6) sprite_h = 6;
+    if (sprite_h > 64) sprite_h = 64;
+    int sprite_w = (int)((float)sprite_h * 0.54f);
+    if (sprite_w < 6) sprite_w = 6;
+    int draw_y0 = center_screen_y - sprite_h / 2;
+    int draw_y1 = center_screen_y + sprite_h / 2;
+    int draw_x0 = screen_x - sprite_w / 2;
+    int draw_x1 = screen_x + sprite_w / 2;
+    if (draw_y0 < 0) draw_y0 = 0;
+    if (draw_y1 >= RENDER_H) draw_y1 = RENDER_H - 1;
+    if (draw_x0 < 0) draw_x0 = 0;
+    if (draw_x1 >= RENDER_W) draw_x1 = RENDER_W - 1;
+    if (draw_x1 <= draw_x0 || draw_y1 <= draw_y0) return;
+    float shade = 1.0f / (1.0f + transform_y * 0.10f);
+    Color c = apply_dof_fade(shade_color(color, shade), transform_y);
+    Color edge = blend_color(c, (Color){255,255,255}, 0.22f);
+    int w = draw_x1 - draw_x0 + 1;
+    int h = draw_y1 - draw_y0 + 1;
+    for (int sy = draw_y0; sy <= draw_y1; sy++) {
+        int v = ((sy - draw_y0) * ENEMY_SPRITE_H) / h;
+        if (v < 0) v = 0;
+        if (v >= ENEMY_SPRITE_H) v = ENEMY_SPRITE_H - 1;
+        for (int sx = draw_x0; sx <= draw_x1; sx++) {
+            int u = ((sx - draw_x0) * ENEMY_SPRITE_W) / w;
+            if (u < 0) u = 0;
+            if (u >= ENEMY_SPRITE_W) u = ENEMY_SPRITE_W - 1;
+            if ((mask16[v] & (uint16_t)(1u << (ENEMY_SPRITE_W - 1 - u))) == 0) continue;
+            if (!sprite_pixel_can_draw(sx, sy, transform_y)) continue;
+            Color pc = (u == 0 || u == ENEMY_SPRITE_W - 1 || v == 0) ? edge : c;
+            fill_rect_raw(fb, TOP_W, TOP_H, sx * PIXEL_SCALE, sy * PIXEL_SCALE, sx * PIXEL_SCALE + PIXEL_SCALE, sy * PIXEL_SCALE + PIXEL_SCALE, pc);
+            mark_sprite_pixel_depth(sx, sy, transform_y);
+        }
+    }
+}
+
 static void draw_enemy_sprite_with_hp(u8 *fb,
                                       float cam_x, float cam_y,
                                       float dir_x, float dir_y,
@@ -294,54 +633,42 @@ static void draw_enemy_sprite_with_hp(u8 *fb,
     float ry = e->y - cam_y;
     float det = plane_x * dir_y - dir_x * plane_y;
     if (fabsf(det) < 0.000001f) return;
-
     float inv_det = 1.0f / det;
     float transform_x = inv_det * (dir_y * rx - dir_x * ry);
     float transform_y = inv_det * (-plane_y * rx + plane_x * ry);
     if (transform_y <= 0.08f) return;
-
     int screen_x = (int)((RENDER_W * 0.5f) * (1.0f + transform_x / transform_y));
     float hit_t = clampf32(e->hit_timer / 0.28f, 0.0f, 1.0f);
     float death_t = e->dying ? clampf32(1.0f - (e->death_timer / 0.48f), 0.0f, 1.0f) : 0.0f;
-    if (hit_t > 0.0f) {
-        screen_x += (int)(sinf(hit_t * 32.0f) * 4.0f);
-    }
-
+    if (hit_t > 0.0f) screen_x += (int)(sinf(hit_t * 32.0f) * 4.0f);
     bool boss_sprite = (e->ai_rank == AI_RANK_BOSS);
-    int mask_w = boss_sprite ? BOSS_SPRITE_W : 8;
-    int mask_h = boss_sprite ? BOSS_SPRITE_H : 8;
-    float hscale = boss_sprite ? 1.58f : 0.95f;
-    float wscale = boss_sprite ? 1.00f : 1.0f;
-    if (e->dying) {
-        hscale *= (1.0f - death_t * 0.82f);
-        wscale += death_t * 1.10f;
-    } else if (hit_t > 0.0f) {
-        hscale *= (1.0f - hit_t * 0.16f);
-        wscale += hit_t * 0.26f;
-    }
-
+    int mask_w = boss_sprite ? BOSS_SPRITE_W : ENEMY_SPRITE_W;
+    int mask_h = boss_sprite ? BOSS_SPRITE_H : ENEMY_SPRITE_H;
+    int size_pct = e->size_pct ? e->size_pct : (boss_sprite ? 118 : 100);
+    if (!boss_sprite && size_pct > 115) size_pct = 115;
+    if (boss_sprite && size_pct < 108) size_pct = 108;
+    float hscale = (boss_sprite ? 1.12f : 0.92f) * ((float)size_pct / 100.0f);
+    float wscale = 1.0f;
+    if (e->dying) { hscale *= (1.0f - death_t * 0.82f); wscale += death_t * 1.10f; }
+    else if (hit_t > 0.0f) { hscale *= (1.0f - hit_t * 0.16f); wscale += hit_t * 0.26f; }
     int sprite_h = (int)fabsf((RENDER_H / transform_y) * hscale * clampf32(g_level_depth, 0.50f, 2.00f));
-    if (sprite_h < 3) sprite_h = 3;
-    if (sprite_h > RENDER_H * 2) sprite_h = RENDER_H * 2;
-    int sprite_w = boss_sprite ? (int)((float)sprite_h * 0.82f * wscale) : (int)((float)sprite_h * 0.50f * wscale);
-    if (sprite_w < (boss_sprite ? 8 : 4)) sprite_w = boss_sprite ? 8 : 4;
-
+    if (sprite_h < 4) sprite_h = 4;
+    if (sprite_h > (boss_sprite ? 82 : 68)) sprite_h = boss_sprite ? 82 : 68;
+    int sprite_w = (int)((float)sprite_h * (boss_sprite ? 0.70f : 0.54f) * wscale);
+    if (sprite_w < (boss_sprite ? 10 : 5)) sprite_w = boss_sprite ? 10 : 5;
     float base_z = sprite_base_z_at(e->x, e->y);
     int draw_y1 = project_world_z_to_render_y(center_y, transform_y, base_z);
     int draw_y0 = draw_y1 - sprite_h;
     int draw_x0 = screen_x - sprite_w / 2;
     int draw_x1 = screen_x + sprite_w / 2;
-
     if (draw_y0 < 0) draw_y0 = 0;
     if (draw_y1 >= RENDER_H) draw_y1 = RENDER_H - 1;
     if (draw_x0 < 0) draw_x0 = 0;
     if (draw_x1 >= RENDER_W) draw_x1 = RENDER_W - 1;
     if (draw_x1 <= draw_x0 || draw_y1 <= draw_y0) return;
-
     float shade = 1.0f / (1.0f + transform_y * 0.10f);
     Color c = apply_dof_fade(shade_color(base, shade), transform_y);
     Color edge = blend_color(c, (Color){255, 255, 255}, 0.25f);
-
     int w = draw_x1 - draw_x0 + 1;
     int h = draw_y1 - draw_y0 + 1;
     for (int sy = draw_y0; sy <= draw_y1; sy++) {
@@ -352,33 +679,32 @@ static void draw_enemy_sprite_with_hp(u8 *fb,
             int u = ((sx - draw_x0) * mask_w) / w;
             if (u < 0) u = 0;
             if (u >= mask_w) u = mask_w - 1;
-            bool on = boss_sprite ? ((e->boss_sprite[v] & (uint16_t)(1u << (BOSS_SPRITE_W - 1 - u))) != 0)
-                                  : ((e->sprite[v] & (uint8_t)(1u << (7 - u))) != 0);
+            bool on = boss_sprite ? ((e->boss_sprite[v] & (uint32_t)(1u << (BOSS_SPRITE_W - 1 - u))) != 0)
+                                  : ((e->sprite16[v] & (uint16_t)(1u << (ENEMY_SPRITE_W - 1 - u))) != 0);
             if (!on) continue;
             if (!sprite_pixel_can_draw(sx, sy, transform_y)) continue;
-            int px0 = sx * PIXEL_SCALE;
-            int px1 = px0 + PIXEL_SCALE;
-            int py0 = sy * PIXEL_SCALE;
-            int py1 = py0 + PIXEL_SCALE;
             Color pc = c;
-            if (e->dying) pc = blend_color(pc, (Color){35, 20, 18}, death_t * 0.65f);
+            if (e->dying) pc = blend_color(pc, (Color){35,20,18}, death_t * 0.65f);
             if (u == 0 || u == mask_w - 1 || v == 0) pc = edge;
-            fill_rect_raw(fb, TOP_W, TOP_H, px0, py0, px1, py1, pc);
+            fill_rect_raw(fb, TOP_W, TOP_H, sx * PIXEL_SCALE, sy * PIXEL_SCALE, sx * PIXEL_SCALE + PIXEL_SCALE, sy * PIXEL_SCALE + PIXEL_SCALE, pc);
             mark_sprite_pixel_depth(sx, sy, transform_y);
         }
     }
-
-    int hp_max = e->hp_max > 0 ? e->hp_max : 7;
-    int hp = e->hp;
-    if (hp < 0) hp = 0;
-    if (hp > hp_max) hp = hp_max;
-    int bx0 = draw_x0 * PIXEL_SCALE;
-    int bx1 = (draw_x1 + 1) * PIXEL_SCALE;
-    int by0 = draw_y0 * PIXEL_SCALE - 5;
-    if (by0 < 2) by0 = 2;
-    fill_rect_raw(fb, TOP_W, TOP_H, bx0, by0, bx1, by0 + 3, (Color){35, 10, 10});
-    int fill_w = ((bx1 - bx0) * hp) / hp_max;
-    fill_rect_raw(fb, TOP_W, TOP_H, bx0, by0, bx0 + fill_w, by0 + 3, (Color){90, 255, 90});
+    float ddx = e->x - g_level.player_x;
+    float ddy = e->y - g_level.player_y;
+    if ((ddx * ddx + ddy * ddy) <= ENEMY_HP_BAR_DIST2 && world_text_visible_at(screen_x, draw_y0, transform_y)) {
+        int hp_max = e->hp_max > 0 ? e->hp_max : 7;
+        int hp = e->hp;
+        if (hp < 0) hp = 0;
+        if (hp > hp_max) hp = hp_max;
+        int bx0 = draw_x0 * PIXEL_SCALE;
+        int bx1 = (draw_x1 + 1) * PIXEL_SCALE;
+        int by0 = draw_y0 * PIXEL_SCALE - 5;
+        if (by0 < 2) by0 = 2;
+        fill_rect_raw(fb, TOP_W, TOP_H, bx0, by0, bx1, by0 + 3, (Color){35,10,10});
+        int fill_w = ((bx1 - bx0) * hp) / hp_max;
+        fill_rect_raw(fb, TOP_W, TOP_H, bx0, by0, bx0 + fill_w, by0 + 3, (Color){90,255,90});
+    }
     (void)zbuf;
 }
 
@@ -494,7 +820,7 @@ static void draw_billboard_masked_sprite_centered_z(u8 *fb,
     int screen_x = (int)((RENDER_W * 0.5f) * (1.0f + transform_x / transform_y));
     int sprite_h = (int)fabsf((RENDER_H / transform_y) * height_scale * clampf32(g_level_depth, 0.50f, 2.00f));
     if (sprite_h < 5) sprite_h = 5;
-    if (sprite_h > RENDER_H) sprite_h = RENDER_H;
+    if (sprite_h > 48) sprite_h = 48;
 
     int sprite_w = sprite_h;
     int center_screen_y = project_world_z_to_render_y(center_y, transform_y, world_center_z);
@@ -833,21 +1159,31 @@ static void render_raycast_eye(const Level *lv, gfx3dSide_t side, float eye_offs
             if (!c->active) continue;
             if (!entity_in_front_and_near(pos_x, pos_y, dir_x, dir_y, c->fx, c->fy, ITEM_RENDER_DIST2)) continue;
             item_budget++;
+            float item_base_z = sprite_base_z_at(c->fx, c->fy);
+            /* draw pickup shadows next to the matching sprite scale below */
             if (c->kind == REWARD_KEY) {
-                float cz = sprite_base_z_at(c->fx, c->fy) + EYE_HEIGHT;
+                float cz = item_base_z + EYE_HEIGHT;
+                draw_ground_shadow(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, c->fx, c->fy, item_base_z, 0.42f, mask8_visible_width_ratio(KEY_SPRITE_8X8));
                 draw_billboard_masked_sprite_centered_z(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, zbuf,
                                              c->fx, c->fy, cz, 0.42f, KEY_SPRITE_8X8, (Color){245, 205, 55});
+            } else if (c->kind == REWARD_HEALTH) {
+                float cz = item_base_z + EYE_HEIGHT * 0.88f;
+                draw_ground_shadow(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, c->fx, c->fy, item_base_z, 0.34f, mask8_visible_width_ratio(HEART_SPRITE_8X8));
+                draw_billboard_masked_sprite_centered_z(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, zbuf,
+                                             c->fx, c->fy, cz, 0.34f, HEART_SPRITE_8X8, (Color){255,80,105});
             } else if (c->kind >= REWARD_WEAPON_BASE && c->kind < REWARD_WEAPON_BASE + MAX_WEAPONS) {
                 int wi = c->kind - REWARD_WEAPON_BASE;
                 Color wc = npc_color_for(g_weapons[wi].color_id);
                 const uint8_t *wsp = g_weapons[wi].sprite;
                 if (!wsp[0] && !wsp[1] && !wsp[2] && !wsp[3] && !wsp[4] && !wsp[5] && !wsp[6] && !wsp[7]) wsp = WEAPON_SPRITE_8X8;
-                draw_billboard_masked_sprite(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, zbuf,
-                                             c->fx, c->fy, 0.44f, wsp, wc);
+                draw_ground_shadow(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, c->fx, c->fy, item_base_z, 0.44f, mask8_visible_width_ratio(wsp));
+                draw_billboard_masked_sprite_centered_z(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, zbuf,
+                                             c->fx, c->fy, item_base_z + EYE_HEIGHT * 0.76f, 0.44f, wsp, wc);
             } else {
                 Color cc = (c->kind == REWARD_PINK) ? (Color){255, 105, 190} : ((c->kind == REWARD_PURPLE) ? (Color){175, 85, 255} : (Color){245, 205, 55});
                 float scale = (c->kind == REWARD_PURPLE) ? 0.34f : ((c->kind == REWARD_PINK) ? 0.30f : 0.26f);
-                float cz = sprite_base_z_at(c->fx, c->fy) + EYE_HEIGHT;
+                float cz = item_base_z + EYE_HEIGHT;
+                draw_ground_shadow(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, c->fx, c->fy, item_base_z, scale, mask8_visible_width_ratio(DOT_SPRITE_8X8));
                 draw_billboard_masked_sprite_centered_z(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, zbuf,
                                              c->fx, c->fy, cz, scale, DOT_SPRITE_8X8, cc);
             }
@@ -855,26 +1191,45 @@ static void render_raycast_eye(const Level *lv, gfx3dSide_t side, float eye_offs
         for (int ni = 0; ni < g_npc_count && npc_budget < 10; ni++) {
             const NPC *n = &g_npcs[ni];
             if (!n->active) continue;
-            const uint8_t *nsp = n->sprite;
-            if (!nsp[0] && !nsp[1] && !nsp[2] && !nsp[3] && !nsp[4] && !nsp[5] && !nsp[6] && !nsp[7]) nsp = KEY_SPRITE_8X8;
+            const uint16_t *nsp16 = n->sprite16;
+            bool npc16_empty = true;
+            for (int si = 0; si < ENEMY_SPRITE_ROWS; si++) if (nsp16[si]) npc16_empty = false;
             float nx = (float)n->x + 0.5f;
             float ny = (float)n->y + 0.5f;
             if (!entity_in_front_and_near(pos_x, pos_y, dir_x, dir_y, nx, ny, NPC_RENDER_DIST2)) continue;
             npc_budget++;
-            draw_billboard_masked_sprite(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, zbuf,
-                                         nx, ny, 0.82f, nsp, npc_color_for(n->color_id));
+            if (!npc16_empty) {
+                draw_ground_shadow(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, nx, ny, sprite_base_z_at(nx, ny), 0.82f, mask16_visible_width_ratio(nsp16));
+                draw_billboard_masked_sprite16_centered_z(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, zbuf,
+                                                         nx, ny, sprite_base_z_at(nx, ny) + 0.42f, 0.82f, nsp16, npc_color_for(n->color_id));
+            } else {
+                const uint8_t *nsp = n->sprite;
+                if (!nsp[0] && !nsp[1] && !nsp[2] && !nsp[3] && !nsp[4] && !nsp[5] && !nsp[6] && !nsp[7]) nsp = KEY_SPRITE_8X8;
+                draw_ground_shadow(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, nx, ny, sprite_base_z_at(nx, ny), 0.82f, mask8_visible_width_ratio(nsp));
+                draw_billboard_masked_sprite(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, zbuf,
+                                             nx, ny, 0.82f, nsp, npc_color_for(n->color_id));
+            }
             float ndx = nx - pos_x;
             float ndy = ny - pos_y;
             float nd2 = ndx * ndx + ndy * ndy;
             bool show_text = false;
-            if (n->talk_timer > 0.0f) show_text = true;
+            bool close_for_text = nd2 <= 12.0f * 12.0f;
+            if (close_for_text && n->talk_timer > 0.0f) show_text = true;
             else if (n->text_mode == TEXT_MODE_NEAR && nd2 <= 10.0f * 10.0f) show_text = true;
             else if (n->text_mode == TEXT_MODE_ALWAYS && nd2 <= 16.0f * 16.0f) show_text = true;
             if (show_text) {
-                draw_world_text_label(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, zbuf,
+                float telapsed = n->talk_timer > 0.0f ? n->talk_timer : 999.0f;
+                draw_world_text_label_typed(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, zbuf,
                                       nx, ny, 0.65f,
-                                      n->completed ? "THANKS" : n->text, (Color){245,245,245}, (Color){15,20,28});
+                                      n->completed ? "THANKS" : n->text, n->text_speed, telapsed, (Color){245,245,245}, (Color){15,20,28});
             }
+        }
+        for (int pi = 0; pi < g_projectile_count; pi++) {
+            const Projectile *pr = &g_projectiles[pi];
+            if (!pr->active) continue;
+            if (!entity_in_front_and_near(pos_x, pos_y, dir_x, dir_y, pr->x, pr->y, ENEMY_RENDER_DIST2)) continue;
+            draw_billboard_masked_sprite_centered_z(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, zbuf,
+                                         pr->x, pr->y, pr->z, 0.25f, ARROW_SPRITE_8X8, (Color){255, 195, 75});
         }
         if (g_has_success) {
             draw_success_floor_marker(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y,
@@ -885,18 +1240,41 @@ static void render_raycast_eye(const Level *lv, gfx3dSide_t side, float eye_offs
             if (!e->active) continue;
             if (!entity_in_front_and_near(pos_x, pos_y, dir_x, dir_y, e->x, e->y, ENEMY_RENDER_DIST2)) continue;
             enemy_budget++;
-            Color ec = e->dying ? (Color){135, 70, 50} : (e->state ? (Color){255, 75, 65} : npc_color_for(e->color_id));
-            draw_enemy_sprite_with_hp(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, zbuf, e, ec);
-            const char *eline = NULL;
             float edx = e->x - pos_x;
             float edy = e->y - pos_y;
             float ed2 = edx * edx + edy * edy;
+            Color ec = e->dying ? (Color){135, 70, 50} : (e->state ? (Color){255, 75, 65} : npc_color_for(e->color_id));
+            if (!e->dying && g_current_weapon >= 0 && g_current_weapon < MAX_WEAPONS && g_player_weapons[g_current_weapon]) {
+                float wr = 0.85f + (float)g_weapons[g_current_weapon].range * 0.42f;
+                float fx = cosf(g_level.player_angle);
+                float fy = sinf(g_level.player_angle);
+                float dot = 0.0f;
+                if (ed2 > 0.0001f) dot = ((edx * fx) + (edy * fy)) / sqrtf(ed2);
+                if (ed2 <= wr * wr && dot > 0.40f) {
+                    ec = blend_color(ec, (Color){105, 220, 255}, 0.30f);
+                }
+            }
+            bool boss_shadow = (e->ai_rank == AI_RANK_BOSS);
+            int shadow_size_pct = e->size_pct ? e->size_pct : (boss_shadow ? 118 : 100);
+            if (!boss_shadow && shadow_size_pct > 115) shadow_size_pct = 115;
+            if (boss_shadow && shadow_size_pct < 108) shadow_size_pct = 108;
+            float hit_t_shadow = clampf32(e->hit_timer / 0.28f, 0.0f, 1.0f);
+            float death_t_shadow = e->dying ? clampf32(1.0f - (e->death_timer / 0.48f), 0.0f, 1.0f) : 0.0f;
+            float shadow_hscale = (boss_shadow ? 1.12f : 0.92f) * ((float)shadow_size_pct / 100.0f);
+            float shadow_wratio = boss_shadow ? 0.70f : 0.54f;
+            shadow_wratio *= boss_shadow ? mask32_visible_width_ratio(e->boss_sprite) : mask16_visible_width_ratio(e->sprite16);
+            if (e->dying) { shadow_hscale *= (1.0f - death_t_shadow * 0.82f); shadow_wratio *= (1.0f + death_t_shadow * 1.10f); }
+            else if (hit_t_shadow > 0.0f) { shadow_hscale *= (1.0f - hit_t_shadow * 0.16f); shadow_wratio *= (1.0f + hit_t_shadow * 0.26f); }
+            draw_ground_shadow(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, e->x, e->y, sprite_base_z_at(e->x, e->y), shadow_hscale, shadow_wratio);
+            draw_enemy_sprite_with_hp(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, zbuf, e, ec);
+            const char *eline = NULL;
             bool enemy_text_near = ed2 <= 6.0f * 6.0f;
             if (!e->dying && e->text_count > 0 && (e->text_timer > 0.0f || (e->state && enemy_text_near))) eline = e->text[e->text_index % e->text_count];
             else if (!e->dying && e->state && enemy_text_near) eline = "!!!";
             if (eline && eline[0]) {
-                draw_world_text_label(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, zbuf,
-                                      e->x, e->y, 0.74f, eline, (Color){255,235,210}, (Color){35,8,8});
+                float eelapsed = e->text_timer > 0.0f ? (1.1f - e->text_timer) : 999.0f;
+                draw_world_text_label_typed(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, zbuf,
+                                      e->x, e->y, 0.74f, eline, e->text_speed, eelapsed, (Color){255,235,210}, (Color){35,8,8});
             }
         }
     }
@@ -920,6 +1298,17 @@ static void render_raycast_eye(const Level *lv, gfx3dSide_t side, float eye_offs
         draw_text3x5(fb, TOP_W, TOP_H, 98, 138, buf, (Color){180,255,180}, 2);
         if (g_random_play) draw_text3x5(fb, TOP_W, TOP_H, 98, 156, "A NEXT  START MENU", (Color){235,235,235}, 1);
         else draw_text3x5(fb, TOP_W, TOP_H, 98, 156, "START MENU", (Color){235,235,235}, 1);
+    }
+
+    if (g_player_dead && !g_render_angle_override) {
+        char dbuf[64];
+        fill_rect_raw(fb, TOP_W, TOP_H, 58, 54, 342, 176, (Color){28, 4, 4});
+        fill_rect_raw(fb, TOP_W, TOP_H, 64, 60, 336, 170, (Color){72, 10, 12});
+        draw_text3x5(fb, TOP_W, TOP_H, 142, 68, "YOU FELL", (Color){255, 160, 145}, 2);
+        snprintf(dbuf, sizeof(dbuf), "KILLED BY %s", g_death_killer[0] ? g_death_killer : "AN ENEMY");
+        draw_text3x5(fb, TOP_W, TOP_H, 86, 98, dbuf, (Color){255, 220, 210}, 1);
+        draw_text3x5(fb, TOP_W, TOP_H, 100, 122, "A RETRY FROM START", (Color){245, 245, 210}, 1);
+        draw_text3x5(fb, TOP_W, TOP_H, 100, 138, "START RETURN TO MENU", (Color){245, 245, 210}, 1);
     }
 
     if (g_render_world_hud) {
@@ -1042,6 +1431,106 @@ static void draw_editor_button(u8 *fb, int x0, int y0, int x1, int y1, const cha
     draw_text3x5(fb, BOT_W, BOT_H, tx, ty, label, text, 1);
 }
 
+static void draw_icon8_bottom(u8 *fb, int x, int y, const uint8_t *mask, Color c, int scale) {
+    if (!mask || scale < 1) return;
+    for (int yy = 0; yy < 8; yy++) {
+        uint8_t row = mask[yy];
+        for (int xx = 0; xx < 8; xx++) {
+            if (row & (uint8_t)(0x80u >> xx)) {
+                fill_rect_raw(fb, BOT_W, BOT_H, x + xx * scale, y + yy * scale,
+                              x + (xx + 1) * scale, y + (yy + 1) * scale, c);
+            }
+        }
+    }
+}
+
+static void draw_bottom_health_bar(u8 *fb, int x, int y, int w, int h) {
+    int maxhp = g_player_health_max > 0 ? g_player_health_max : PLAYER_HEALTH_DEFAULT;
+    int hp = clampi32(g_player_health, 0, maxhp);
+    fill_rect_raw(fb, BOT_W, BOT_H, x - 1, y - 1, x + w + 1, y + h + 1, (Color){90, 35, 35});
+    fill_rect_raw(fb, BOT_W, BOT_H, x, y, x + w, y + h, (Color){28, 10, 12});
+    int fill = (w * hp) / maxhp;
+    Color hc = g_player_dead ? (Color){90, 90, 90} : (Color){75, 230, 95};
+    if (g_player_hurt_timer > 0.0f && !g_player_dead) hc = (Color){255, 90, 80};
+    fill_rect_raw(fb, BOT_W, BOT_H, x, y, x + fill, y + h, hc);
+}
+
+static const char *quest_hud_text(const NPC *n) {
+    static char buf[48];
+    if (!n) return "";
+    if (n->completed) snprintf(buf, sizeof(buf), "DONE: %.22s", n->text);
+    else if (n->quest_type == QUEST_NONE) snprintf(buf, sizeof(buf), "TALK: %.22s", n->text);
+    else if (n->quest_type == QUEST_COINS) snprintf(buf, sizeof(buf), "COINS %d/%d", g_player_score, n->quest_target);
+    else if (n->quest_type == QUEST_KEY) snprintf(buf, sizeof(buf), "KEYS %d/%d", g_player_keys, n->quest_target);
+    else snprintf(buf, sizeof(buf), "NPCS %d/%d", g_missions_done, n->quest_target);
+    return buf;
+}
+
+static void draw_play_hud(u8 *fb) {
+    fill_rect_raw(fb, BOT_W, BOT_H, 0, 0, BOT_W, BOT_H, (Color){6, 7, 12});
+    draw_text3x5(fb, BOT_W, BOT_H, 8, 7, "PLAYER", (Color){120,190,255}, 2);
+    draw_bottom_health_bar(fb, 84, 10, 90, 9);
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%d/%d", g_player_health, g_player_health_max);
+    draw_text3x5(fb, BOT_W, BOT_H, 180, 11, buf, (Color){230,245,230}, 1);
+
+    draw_text_number(fb, BOT_W, BOT_H, 8, 30, "COINS ", g_coins_bank, (Color){245,220,80}, 1);
+    draw_text_number(fb, BOT_W, BOT_H, 78, 30, "KEYS ", g_player_keys, (Color){245,205,55}, 1);
+    draw_text_number(fb, BOT_W, BOT_H, 140, 30, "SCORE ", g_player_score, (Color){230,230,160}, 1);
+
+    fill_rect_raw(fb, BOT_W, BOT_H, 206, 8, 312, 70, (Color){28, 32, 48});
+    fill_rect_raw(fb, BOT_W, BOT_H, 210, 12, 248, 50, (Color){8, 9, 14});
+    int bounce = 0;
+    if (g_weapon_bounce_timer > 0.0f) {
+        float t = clampf32(g_weapon_bounce_timer / 0.22f, 0.0f, 1.0f);
+        bounce = -(int)(sinf((1.0f - t) * PI_F) * 5.0f);
+    }
+    if (g_current_weapon >= 0 && g_current_weapon < MAX_WEAPONS && g_player_weapons[g_current_weapon]) {
+        Color wc = npc_color_for(g_weapons[g_current_weapon].color_id);
+        draw_icon8_bottom(fb, 217, 19 + bounce, g_weapons[g_current_weapon].sprite, wc, 3);
+        snprintf(buf, sizeof(buf), "%s", weapon_name(g_current_weapon));
+        draw_text3x5(fb, BOT_W, BOT_H, 252, 14, buf, (Color){190,220,255}, 1);
+        draw_text_number(fb, BOT_W, BOT_H, 252, 28, "DMG ", g_weapons[g_current_weapon].damage, (Color){255,210,160}, 1);
+    } else {
+        draw_text3x5(fb, BOT_W, BOT_H, 216, 26, "NO WEAPON", (Color){160,160,170}, 1);
+    }
+
+    int ix = 210;
+    for (int wi = 0; wi < MAX_WEAPONS; wi++) {
+        if (!g_player_weapons[wi]) continue;
+        Color wc = npc_color_for(g_weapons[wi].color_id);
+        fill_rect_raw(fb, BOT_W, BOT_H, ix - 1, 55, ix + 10, 66, wi == g_current_weapon ? (Color){245,245,245} : (Color){55,55,65});
+        draw_icon8_bottom(fb, ix, 56, g_weapons[wi].sprite, wc, 1);
+        ix += 13;
+        if (ix > 300) break;
+    }
+
+    draw_text3x5(fb, BOT_W, BOT_H, 8, 54, "QUESTS", (Color){220,220,255}, 1);
+    int qy = 68;
+    int shown = 0;
+    for (int i = 0; i < g_npc_count && shown < 6; i++) {
+        const NPC *n = &g_npcs[i];
+        if (!n->active || n->completed || !n->known) continue;
+        snprintf(buf, sizeof(buf), "%d %s", shown + 1, quest_hud_text(n));
+        draw_text3x5(fb, BOT_W, BOT_H, 8, qy, buf, (Color){230,230,210}, 1);
+        qy += 13;
+        shown++;
+    }
+    if (shown == 0) {
+        draw_text3x5(fb, BOT_W, BOT_H, 8, qy, "NO ACTIVE QUESTS", (Color){145,145,155}, 1);
+        qy += 13;
+    }
+
+    draw_text_number(fb, BOT_W, BOT_H, 8, 156, "MISSIONS ", g_missions_done, (Color){190,225,255}, 1);
+    draw_text_number(fb, BOT_W, BOT_H, 92, 156, "/", g_missions_total, (Color){190,225,255}, 1);
+    draw_text_number(fb, BOT_W, BOT_H, 8, 171, "ENEMIES ", g_enemies_killed, (Color){255,205,190}, 1);
+    draw_text_number(fb, BOT_W, BOT_H, 92, 171, "/", g_enemies_total, (Color){255,205,190}, 1);
+
+    if (g_player_dead) draw_text3x5(fb, BOT_W, BOT_H, 8, 198, "DEAD - A RETRY / START MENU", (Color){255,120,110}, 1);
+    else draw_text3x5(fb, BOT_W, BOT_H, 8, 198, "X ATTACK  Y WEAPON  SELECT TALK", (Color){210,210,210}, 1);
+    draw_text3x5(fb, BOT_W, BOT_H, 8, 220, g_status, (Color){240,240,170}, 1);
+}
+
 void render_bottom_map(void) {
     u8 *fb = gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, NULL, NULL);
     if (!fb) return;
@@ -1056,14 +1545,7 @@ void render_bottom_map(void) {
     }
 
     if (!g_edit_mode && !g_random_play) {
-        fill_rect_raw(fb, BOT_W, BOT_H, 0, 0, BOT_W, BOT_H, (Color){6, 7, 12});
-        draw_text3x5(fb, BOT_W, BOT_H, 12, 12, "PLAY HUD", (Color){120,190,255}, 2);
-        draw_text_number(fb, BOT_W, BOT_H, 12, 40, "KEYS ", g_player_keys, (Color){245,205,55}, 2);
-        draw_text_number(fb, BOT_W, BOT_H, 118, 40, "SCORE ", g_player_score, (Color){230,230,160}, 2);
-        draw_text3x5(fb, BOT_W, BOT_H, 12, 68, g_current_weapon >= 0 ? weapon_name(g_current_weapon) : "UNARMED", (Color){190,220,255}, 2);
-        draw_text3x5(fb, BOT_W, BOT_H, 12, 96, "X ATTACK  Y WEAPON", (Color){210,210,210}, 1);
-        draw_text3x5(fb, BOT_W, BOT_H, 12, 110, "SELECT TALK  START MENU", (Color){210,210,210}, 1);
-        draw_text3x5(fb, BOT_W, BOT_H, 12, 220, g_status, (Color){240,240,170}, 1);
+        draw_play_hud(fb);
         return;
     }
 
@@ -1186,20 +1668,28 @@ static void draw_entity_edit_row(u8 *fb, int row, const char *label, const char 
     draw_text3x5(fb, BOT_W, BOT_H, 128, y + 2, value ? value : "", fg, 1);
 }
 
-static NPC *render_edit_npc(void) {
-    if (g_entity_edit_mode != EDIT_MODE_NPC) return NULL;
+static NPC *render_find_npc_at_edit_pos(void) {
     for (int i = 0; i < g_npc_count; i++) {
         if (g_npcs[i].active && g_npcs[i].x == g_entity_edit_x && g_npcs[i].y == g_entity_edit_y) return &g_npcs[i];
     }
     return NULL;
 }
 
-static EnemyMeta *render_edit_enemy_meta(void) {
-    if (g_entity_edit_mode != EDIT_MODE_ENEMY) return NULL;
+static EnemyMeta *render_find_enemy_meta_at_edit_pos(void) {
     for (int i = 0; i < g_enemy_meta_count; i++) {
         if (g_enemy_metas[i].active && g_enemy_metas[i].x == g_entity_edit_x && g_enemy_metas[i].y == g_entity_edit_y) return &g_enemy_metas[i];
     }
     return NULL;
+}
+
+static NPC *render_edit_npc(void) {
+    if (g_entity_edit_mode != EDIT_MODE_NPC) return NULL;
+    return render_find_npc_at_edit_pos();
+}
+
+static EnemyMeta *render_edit_enemy_meta(void) {
+    if (g_entity_edit_mode != EDIT_MODE_ENEMY) return NULL;
+    return render_find_enemy_meta_at_edit_pos();
 }
 
 
@@ -1221,11 +1711,11 @@ static void draw_sprite_preview_grid(u8 *fb, int x0, int y0, const uint8_t *sp, 
     }
 }
 
-static void draw_boss_sprite_preview_grid(u8 *fb, int x0, int y0, const uint16_t *sp, Color c, int scale, int cx, int cy) {
+static void draw_enemy16_sprite_preview_grid(u8 *fb, int x0, int y0, const uint16_t *sp, Color c, int scale, int cx, int cy) {
     if (!sp) return;
-    for (int y = 0; y < BOSS_SPRITE_H; y++) {
-        for (int x = 0; x < BOSS_SPRITE_W; x++) {
-            bool on = (sp[y] & (uint16_t)(1u << (BOSS_SPRITE_W - 1 - x))) != 0;
+    for (int y = 0; y < ENEMY_SPRITE_H; y++) {
+        for (int x = 0; x < ENEMY_SPRITE_W; x++) {
+            bool on = (sp[y] & (uint16_t)(1u << (ENEMY_SPRITE_W - 1 - x))) != 0;
             Color cell = on ? c : (Color){22, 24, 32};
             fill_rect_raw(fb, BOT_W, BOT_H, x0 + x * scale, y0 + y * scale,
                           x0 + (x + 1) * scale - 1, y0 + (y + 1) * scale - 1, cell);
@@ -1239,34 +1729,64 @@ static void draw_boss_sprite_preview_grid(u8 *fb, int x0, int y0, const uint16_t
     }
 }
 
-static uint16_t *render_boss_sprite_pixels(void) {
+static void draw_boss_sprite_preview_grid(u8 *fb, int x0, int y0, const uint32_t *sp, Color c, int scale, int cx, int cy) {
+    if (!sp) return;
+    for (int y = 0; y < BOSS_SPRITE_H; y++) {
+        for (int x = 0; x < BOSS_SPRITE_W; x++) {
+            bool on = (sp[y] & (uint32_t)(1u << (BOSS_SPRITE_W - 1 - x))) != 0;
+            Color cell = on ? c : (Color){22, 24, 32};
+            fill_rect_raw(fb, BOT_W, BOT_H, x0 + x * scale, y0 + y * scale,
+                          x0 + (x + 1) * scale - 1, y0 + (y + 1) * scale - 1, cell);
+            if (x == cx && y == cy) {
+                fill_rect_raw(fb, BOT_W, BOT_H, x0 + x * scale, y0 + y * scale,
+                              x0 + (x + 1) * scale - 1, y0 + y * scale + 2, (Color){255,255,255});
+                fill_rect_raw(fb, BOT_W, BOT_H, x0 + x * scale, y0 + y * scale,
+                              x0 + x * scale + 2, y0 + (y + 1) * scale - 1, (Color){255,255,255});
+            }
+        }
+    }
+}
+
+static uint32_t *render_boss_sprite_pixels(void) {
     if (g_sprite_edit_target == SPRITE_TARGET_BOSS) {
-        EnemyMeta *m = render_edit_enemy_meta();
+        EnemyMeta *m = render_find_enemy_meta_at_edit_pos();
         return m ? m->boss_sprite : NULL;
+    }
+    return NULL;
+}
+
+static uint16_t *render_enemy16_sprite_pixels(void) {
+    if (g_sprite_edit_target == SPRITE_TARGET_NPC) {
+        NPC *n = render_find_npc_at_edit_pos();
+        return n ? n->sprite16 : NULL;
+    }
+    if (g_sprite_edit_target == SPRITE_TARGET_DEFAULT_NPC) return g_default_npc_sprite16;
+    if (g_sprite_edit_target == SPRITE_TARGET_ENEMY) {
+        EnemyMeta *m = render_find_enemy_meta_at_edit_pos();
+        return m ? m->sprite16 : NULL;
     }
     return NULL;
 }
 
 static uint8_t *render_sprite_pixels(void) {
     if (g_sprite_edit_target == SPRITE_TARGET_NPC) {
-        NPC *n = render_edit_npc();
-        return n ? n->sprite : NULL;
+        return NULL; /* NPC art is edited as 16x16 now. */
     }
     if (g_sprite_edit_target == SPRITE_TARGET_ENEMY) {
-        EnemyMeta *m = render_edit_enemy_meta();
+        EnemyMeta *m = render_find_enemy_meta_at_edit_pos();
         return m ? m->sprite : NULL;
     }
     if (g_sprite_edit_target == SPRITE_TARGET_WEAPON) {
         int wi = clampi32(g_entity_edit_weapon, 0, MAX_WEAPONS - 1);
         return g_weapons[wi].sprite;
     }
-    if (g_sprite_edit_target == SPRITE_TARGET_DEFAULT_NPC) return g_default_npc_sprite;
+    if (g_sprite_edit_target == SPRITE_TARGET_DEFAULT_NPC) return NULL; /* Default NPC art is edited as 16x16 now. */
     return NULL;
 }
 
 static uint8_t render_sprite_color_id(void) {
-    if (g_sprite_edit_target == SPRITE_TARGET_NPC) { NPC *n = render_edit_npc(); return n ? n->color_id : 0; }
-    if (g_sprite_edit_target == SPRITE_TARGET_ENEMY || g_sprite_edit_target == SPRITE_TARGET_BOSS) { EnemyMeta *m = render_edit_enemy_meta(); return m ? m->color_id : 0; }
+    if (g_sprite_edit_target == SPRITE_TARGET_NPC) { NPC *n = render_find_npc_at_edit_pos(); return n ? n->color_id : 0; }
+    if (g_sprite_edit_target == SPRITE_TARGET_ENEMY || g_sprite_edit_target == SPRITE_TARGET_BOSS) { EnemyMeta *m = render_find_enemy_meta_at_edit_pos(); return m ? m->color_id : 0; }
     if (g_sprite_edit_target == SPRITE_TARGET_WEAPON) return g_weapons[clampi32(g_entity_edit_weapon, 0, MAX_WEAPONS - 1)].color_id;
     if (g_sprite_edit_target == SPRITE_TARGET_DEFAULT_NPC) return g_default_npc_color;
     return 0;
@@ -1275,21 +1795,33 @@ static uint8_t render_sprite_color_id(void) {
 void render_sprite_editor(u8 *fb) {
     if (!fb) return;
     uint8_t *sp = render_sprite_pixels();
-    uint16_t *bsp = render_boss_sprite_pixels();
+    uint32_t *bsp = render_boss_sprite_pixels();
+    uint16_t *esp16 = render_enemy16_sprite_pixels();
     fill_rect_raw(fb, BOT_W, BOT_H, 0, 0, BOT_W, BOT_H, (Color){7, 8, 14});
     fill_rect_raw(fb, BOT_W, BOT_H, 0, 0, BOT_W, 28, (Color){18, 24, 42});
-    draw_text3x5(fb, BOT_W, BOT_H, 8, 7, bsp ? "BOSS 14X14 ART" : "SPRITE ART EDITOR", (Color){255,235,170}, 2);
-    if (!sp && !bsp) { draw_text3x5(fb, BOT_W, BOT_H, 20, 50, "NO SPRITE", (Color){255,120,120}, 2); return; }
+    draw_text3x5(fb, BOT_W, BOT_H, 8, 7, bsp ? "BOSS 32X32 ART" : (esp16 ? ((g_sprite_edit_target == SPRITE_TARGET_NPC || g_sprite_edit_target == SPRITE_TARGET_DEFAULT_NPC) ? "NPC 16X16 ART" : "ENEMY 16X16 ART") : "SPRITE ART EDITOR"), (Color){255,235,170}, 2);
+    if (!sp && !bsp && !esp16) { draw_text3x5(fb, BOT_W, BOT_H, 20, 50, "NO SPRITE", (Color){255,120,120}, 2); return; }
     Color c = npc_color_for(render_sprite_color_id());
-    if (bsp) draw_boss_sprite_preview_grid(fb, 104, 38, bsp, c, 10, g_sprite_edit_cursor_x, g_sprite_edit_cursor_y);
+    if (bsp) draw_boss_sprite_preview_grid(fb, 88, 36, bsp, c, 4, g_sprite_edit_cursor_x, g_sprite_edit_cursor_y);
+    else if (esp16) draw_enemy16_sprite_preview_grid(fb, 108, 40, esp16, c, 7, g_sprite_edit_cursor_x, g_sprite_edit_cursor_y);
     else draw_sprite_preview_grid(fb, 96, 44, sp, c, 14, g_sprite_edit_cursor_x, g_sprite_edit_cursor_y);
     draw_text3x5(fb, BOT_W, BOT_H, 22, 44, "D-PAD MOVE", (Color){210,210,210}, 1);
     draw_text3x5(fb, BOT_W, BOT_H, 22, 58, "A TOGGLE", (Color){210,210,210}, 1);
     draw_text3x5(fb, BOT_W, BOT_H, 22, 72, "L/R COLOR", (Color){210,210,210}, 1);
     draw_text3x5(fb, BOT_W, BOT_H, 22, 86, "Y PRESET", (Color){210,210,210}, 1);
     draw_text3x5(fb, BOT_W, BOT_H, 22, 100, "X CLEAR", (Color){210,210,210}, 1);
-    draw_text3x5(fb, BOT_W, BOT_H, 22, 114, bsp ? "14X14 BOSS ONLY" : "8X8 ENTITY ART", (Color){220,220,170}, 1);
-    draw_text3x5(fb, BOT_W, BOT_H, 22, 226, "B BACK - ART SAVES IN BW3/ENM4", (Color){190,200,220}, 1);
+    draw_text3x5(fb, BOT_W, BOT_H, 22, 114, bsp ? "32X32 BOSS" : (esp16 ? "16X16 ART" : "8X8 ART"), (Color){220,220,170}, 1);
+    draw_text3x5(fb, BOT_W, BOT_H, 22, 226, "B BACK - ART SAVES IN BW3/ENM5", (Color){190,200,220}, 1);
+}
+
+static const char *text_speed_name(uint8_t speed) {
+    switch (speed) {
+        case TEXT_SPEED_INSTANT: return "INSTANT";
+        case TEXT_SPEED_SLOW: return "SLOW";
+        case TEXT_SPEED_FAST: return "FAST";
+        case TEXT_SPEED_MEDIUM:
+        default: return "MEDIUM";
+    }
 }
 
 static const char *render_ai_rank_name(uint8_t rank) {
@@ -1324,14 +1856,15 @@ void render_entity_editor(u8 *fb) {
         snprintf(buf, sizeof(buf), "%d", n->reward_amount); draw_entity_edit_row(fb, 4, "AMOUNT", buf);
         const char *tm = (n->text_mode == TEXT_MODE_INTERACT) ? "INTERACT" : ((n->text_mode == TEXT_MODE_NEAR) ? "NEAR" : "FAR OK");
         draw_entity_edit_row(fb, 5, "TEXT MODE", tm);
-        snprintf(buf, sizeof(buf), "%d", n->color_id & 7); draw_entity_edit_row(fb, 6, "NPC COLOR", buf);
-        draw_entity_edit_row(fb, 7, "EDIT ART", "A OPEN");
-        snprintf(buf, sizeof(buf), "%d", g_default_npc_color & 7); draw_entity_edit_row(fb, 8, "DEFAULT COLOR", buf);
-        draw_entity_edit_row(fb, 9, "DEFAULT ART", "A OPEN");
-        draw_entity_edit_row(fb, 10, "USE DEFAULT", "A APPLY");
-        draw_entity_edit_row(fb, 11, "EDIT WEAPON", (n->reward_kind >= REWARD_WEAPON_BASE) ? entity_reward_name(n->reward_kind) : "A OPEN");
-        draw_entity_edit_row(fb, 12, "DONE", "A CLOSE");
-        draw_sprite_preview_grid(fb, 270, 34, n->sprite, npc_color_for(n->color_id), 4, -1, -1);
+        draw_entity_edit_row(fb, 6, "TEXT SPEED", text_speed_name(n->text_speed));
+        snprintf(buf, sizeof(buf), "%d", n->color_id & 7); draw_entity_edit_row(fb, 7, "NPC COLOR", buf);
+        draw_entity_edit_row(fb, 8, "EDIT ART", "A OPEN");
+        snprintf(buf, sizeof(buf), "%d", g_default_npc_color & 7); draw_entity_edit_row(fb, 9, "DEFAULT COLOR", buf);
+        draw_entity_edit_row(fb, 10, "DEFAULT ART", "A OPEN");
+        draw_entity_edit_row(fb, 11, "USE DEFAULT", "A APPLY");
+        draw_entity_edit_row(fb, 12, "EDIT WEAPON", (n->reward_kind >= REWARD_WEAPON_BASE) ? entity_reward_name(n->reward_kind) : "A OPEN");
+        draw_entity_edit_row(fb, 13, "DONE", "A CLOSE");
+        draw_enemy16_sprite_preview_grid(fb, 258, 34, n->sprite16, npc_color_for(n->color_id), 3, -1, -1);
     } else if (g_entity_edit_mode == EDIT_MODE_ENEMY) {
         EnemyMeta *m = render_edit_enemy_meta();
         if (!m) { draw_text3x5(fb, BOT_W, BOT_H, 16, 52, "ENEMY NOT FOUND", (Color){255,120,120}, 1); return; }
@@ -1343,17 +1876,21 @@ void render_entity_editor(u8 *fb) {
         draw_entity_edit_row(fb, 0, "TEXT LINES", joined[0] ? joined : "HEY|OUCH");
         snprintf(buf, sizeof(buf), "%d", m->hp ? m->hp : 5); draw_entity_edit_row(fb, 1, "HEALTH", buf);
         snprintf(buf, sizeof(buf), "%d", m->attack ? m->attack : 1); draw_entity_edit_row(fb, 2, "ATTACK", buf);
-        snprintf(buf, sizeof(buf), "%d", m->color_id & 7); draw_entity_edit_row(fb, 3, "COLOR", buf);
-        draw_entity_edit_row(fb, 4, "AI RANK", render_ai_rank_name(m->ai_rank));
-        draw_entity_edit_row(fb, 5, "RANGED", m->ranged_attack ? "YES" : "NO");
-        snprintf(buf, sizeof(buf), "%d", m->spawn_limit); draw_entity_edit_row(fb, 6, "SPAWN MAX", buf);
-        draw_entity_edit_row(fb, 7, "SPAWN TYPE", render_ai_spawn_name(m->spawn_kind));
-        snprintf(buf, sizeof(buf), "%d", m->command_range ? m->command_range : 10); draw_entity_edit_row(fb, 8, "COMMAND RNG", buf);
-        draw_entity_edit_row(fb, 9, "EDIT 8X8", "A OPEN");
-        draw_entity_edit_row(fb, 10, "BOSS 14X14", "A OPEN");
-        draw_entity_edit_row(fb, 11, "DONE", "A CLOSE");
-        if (m->ai_rank == AI_RANK_BOSS) draw_boss_sprite_preview_grid(fb, 262, 34, m->boss_sprite, npc_color_for(m->color_id), 4, -1, -1);
-        else draw_sprite_preview_grid(fb, 270, 34, m->sprite, npc_color_for(m->color_id), 4, -1, -1);
+        snprintf(buf, sizeof(buf), "%d%%", m->speed_attr ? m->speed_attr : 100); draw_entity_edit_row(fb, 3, "SPEED", buf);
+        snprintf(buf, sizeof(buf), "%d%%", m->size_pct ? m->size_pct : 100); draw_entity_edit_row(fb, 4, "SIZE", buf);
+        draw_entity_edit_row(fb, 5, "TEXT SPEED", text_speed_name(m->text_speed));
+        snprintf(buf, sizeof(buf), "%d", m->color_id & 7); draw_entity_edit_row(fb, 6, "COLOR", buf);
+        draw_entity_edit_row(fb, 7, "AI RANK", render_ai_rank_name(m->ai_rank));
+        draw_entity_edit_row(fb, 8, "RANGED", m->ranged_attack ? "YES" : "NO");
+        snprintf(buf, sizeof(buf), "%d", m->spawn_limit); draw_entity_edit_row(fb, 9, "SPAWN MAX", buf);
+        draw_entity_edit_row(fb, 10, "SPAWN TYPE", render_ai_spawn_name(m->spawn_kind));
+        snprintf(buf, sizeof(buf), "%d", m->command_range ? m->command_range : 10); draw_entity_edit_row(fb, 11, "COMMAND RNG", buf);
+        draw_entity_edit_row(fb, 12, "ENEMY 16X16", "A OPEN");
+        draw_entity_edit_row(fb, 13, "BOSS 32X32", "A OPEN");
+        snprintf(buf, sizeof(buf), "%d", g_player_health_max); draw_entity_edit_row(fb, 14, "PLAYER HP", buf);
+        draw_entity_edit_row(fb, 15, "DONE", "A CLOSE");
+        if (m->ai_rank == AI_RANK_BOSS) draw_boss_sprite_preview_grid(fb, 246, 34, m->boss_sprite, npc_color_for(m->color_id), 2, -1, -1);
+        else draw_enemy16_sprite_preview_grid(fb, 258, 34, m->sprite16, npc_color_for(m->color_id), 3, -1, -1);
     } else if (g_entity_edit_mode == EDIT_MODE_WEAPON) {
         int wi = clampi32(g_entity_edit_weapon, 0, MAX_WEAPONS - 1);
         WeaponDef *w = &g_weapons[wi];
@@ -1464,6 +2001,9 @@ void render_world_menu(void) {
         char npcbuf[16];
         snprintf(npcbuf, sizeof(npcbuf), "%d", g_default_npc_color & 7);
         draw_settings_row(fb, 10, "DEFAULT NPC", npcbuf);
+        char hpbuf[16];
+        snprintf(hpbuf, sizeof(hpbuf), "%d", g_player_health_max);
+        draw_settings_row(fb, 11, "PLAYER HP", hpbuf);
     } else if (g_resize_menu) {
         draw_text3x5(fb, BOT_W, BOT_H, 8, 188, "RESIZE / NEW LEVEL", (Color){255,220,140}, 1);
         draw_text_number(fb, BOT_W, BOT_H, 8, 202, "WIDTH ", g_resize_w, (Color){230,230,230}, 2);
