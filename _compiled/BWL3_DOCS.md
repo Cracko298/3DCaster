@@ -930,38 +930,7 @@ else if magic == "BW3":
 
 ---
 
-# 16. Recommended Future-Proofing
-
-Current BW3 chunks are compact but not very future-proof because chunks do not include lengths.
-
-For a future `BW4`, a safer chunk format would be:
-
-```text
-char[4] tag
-u32 chunk_size
-u8  payload[chunk_size]
-```
-
-That would let older versions skip unknown chunks safely.
-
-Recommended future layout:
-
-```text
-BW4 header
-tile stream
-chunks:
-    WLD6 size payload
-    NPC6 size payload
-    ENM6 size payload
-    WEP4 size payload
-    END! 0
-```
-
-This would make adding things like shops, cutscenes, inventory, scripts, or dialogue trees much safer.
-
----
-
-# 17. Quick Reference
+# 16. Quick Reference
 
 ## Current writer output
 
