@@ -7,6 +7,12 @@ static bool s_touch_look_active = false;
 static int s_touch_last_x = 0;
 static int s_touch_last_y = 0;
 
+const char *editor_tool_name(int tool) {
+    if (tool == EDITOR_TOOL_SELECT) return "SELECT";
+    if (tool == EDITOR_TOOL_ROOM) return "ROOM";
+    return "PAINT";
+}
+
 static const char *tile_short_name(uint8_t tile) {
     tile &= MAX_TILE_ID;
     switch (tile) {
@@ -720,7 +726,14 @@ EnemyMeta *enemy_meta_ensure_at(int x, int y) {
     m->spawn_kind = AI_SPAWN_NONE;
     m->spawn_limit = 0;
     m->command_range = 10;
+    m->sight_range = 13;
     m->ranged_attack = 0;
+    m->melee_range = 7;
+    m->attack_cooldown = 7;
+    m->spawn_cooldown = 25;
+    m->projectile_color = m->color_id & 7;
+    m->projectile_style = 0;
+    m->projectile_anim = 1;
     m->speed_attr = 100;
     m->size_pct = 100;
     m->text_speed = TEXT_SPEED_MEDIUM;
@@ -926,7 +939,7 @@ static EnemyMeta *entity_editor_enemy_meta(void) {
 
 static int entity_editor_row_count(void) {
     if (g_entity_edit_mode == EDIT_MODE_NPC) return 14;
-    if (g_entity_edit_mode == EDIT_MODE_ENEMY) return 16;
+    if (g_entity_edit_mode == EDIT_MODE_ENEMY) return 23;
     if (g_entity_edit_mode == EDIT_MODE_WEAPON) return 8;
     if (g_entity_edit_mode == EDIT_MODE_SPRITE) return 1;
     return 1;
@@ -960,12 +973,14 @@ void close_entity_editor(void) {
     }
     g_entity_edit_mode = EDIT_MODE_NONE;
     g_entity_edit_cursor = 0;
+    g_entity_edit_scroll = 0;
     snprintf(g_status, sizeof(g_status), "EDIT CLOSED");
 }
 
 void open_weapon_editor(int weapon) {
     g_entity_edit_mode = EDIT_MODE_WEAPON;
     g_entity_edit_cursor = 0;
+    g_entity_edit_scroll = 0;
     g_entity_edit_weapon = clampi32(weapon, 0, MAX_WEAPONS - 1);
     snprintf(g_status, sizeof(g_status), "WEAPON EDIT %s", weapon_name(g_entity_edit_weapon));
 }
@@ -977,6 +992,7 @@ void open_entity_editor_at(int x, int y) {
         if (!n) return;
         g_entity_edit_mode = EDIT_MODE_NPC;
         g_entity_edit_cursor = 0;
+        g_entity_edit_scroll = 0;
         g_entity_edit_x = x;
         g_entity_edit_y = y;
         snprintf(g_status, sizeof(g_status), "NPC EDIT %d %d", x, y);
@@ -986,9 +1002,16 @@ void open_entity_editor_at(int x, int y) {
         if (m->hp == 0) m->hp = (uint8_t)(5 + ((x + y) & 3));
         if (m->attack == 0) m->attack = 1;
         if (m->command_range == 0) m->command_range = 10;
+        if (m->sight_range == 0) m->sight_range = 13;
+        if (m->melee_range == 0) m->melee_range = 7;
+        if (m->attack_cooldown == 0) m->attack_cooldown = 7;
+        if (m->spawn_cooldown == 0) m->spawn_cooldown = 25;
+        m->projectile_color &= 7;
+        if (m->projectile_style > 2) m->projectile_style = 0;
         ensure_boss_sprite_or_default(m->boss_sprite);
         g_entity_edit_mode = EDIT_MODE_ENEMY;
         g_entity_edit_cursor = 0;
+        g_entity_edit_scroll = 0;
         g_entity_edit_x = x;
         g_entity_edit_y = y;
         snprintf(g_status, sizeof(g_status), "ENEMY EDIT %d %d", x, y);
@@ -1039,14 +1062,20 @@ void handle_entity_edit_input(u32 kDown) {
     if (kDown & KEY_TOUCH) {
         touchPosition tp;
         hidTouchRead(&tp);
-        int row = ((int)tp.py - 40) / 15;
-        if (row >= 0 && row < rows && tp.px >= 8 && tp.px <= BOT_W - 8) {
+        int visible = (g_entity_edit_mode == EDIT_MODE_WEAPON) ? 8 : 12;
+        int row = g_entity_edit_scroll + (((int)tp.py - 40) / 15);
+        if (row >= g_entity_edit_scroll && row < g_entity_edit_scroll + visible && row < rows && tp.px >= 8 && tp.px <= BOT_W - 8) {
             g_entity_edit_cursor = row;
             kDown |= KEY_A;
         }
     }
     if (kDown & KEY_DUP) g_entity_edit_cursor = (g_entity_edit_cursor + rows - 1) % rows;
     if (kDown & KEY_DDOWN) g_entity_edit_cursor = (g_entity_edit_cursor + 1) % rows;
+    int visible_rows = (g_entity_edit_mode == EDIT_MODE_WEAPON) ? 8 : 12;
+    if (g_entity_edit_cursor < g_entity_edit_scroll) g_entity_edit_scroll = g_entity_edit_cursor;
+    if (g_entity_edit_cursor >= g_entity_edit_scroll + visible_rows) g_entity_edit_scroll = g_entity_edit_cursor - visible_rows + 1;
+    if (g_entity_edit_scroll < 0) g_entity_edit_scroll = 0;
+    if (g_entity_edit_scroll > rows - visible_rows) g_entity_edit_scroll = rows > visible_rows ? rows - visible_rows : 0;
     if (kDown & KEY_B) { close_entity_editor(); return; }
 
     int dir = 0;
@@ -1096,6 +1125,12 @@ void handle_entity_edit_input(u32 kDown) {
         if (m->speed_attr == 0) m->speed_attr = 100;
         if (m->size_pct == 0) m->size_pct = 100;
         if (m->text_speed > TEXT_SPEED_FAST) m->text_speed = TEXT_SPEED_MEDIUM;
+        if (!m->melee_range) m->melee_range = (m->ai_rank == AI_RANK_BOSS) ? 10 : 7;
+        if (!m->sight_range) m->sight_range = (m->ai_rank == AI_RANK_BOSS) ? 20 : (m->ai_rank == AI_RANK_CAPTAIN ? 16 : 13);
+        if (!m->attack_cooldown) m->attack_cooldown = 7;
+        if (!m->spawn_cooldown) m->spawn_cooldown = 25;
+        m->projectile_color &= 7;
+        if (m->projectile_style > 2) m->projectile_style = 0;
         switch (g_entity_edit_cursor) {
             case 0: if (kDown & KEY_A) edit_enemy_text_meta(m); break;
             case 1:
@@ -1116,34 +1151,47 @@ void handle_entity_edit_input(u32 kDown) {
                 break;
             case 5: if (dir || (kDown & KEY_A)) { m->text_speed = (uint8_t)((m->text_speed + (dir < 0 ? 3 : 1)) % 4); g_dirty = true; } break;
             case 6: if (dir || (kDown & KEY_A)) { m->color_id = (uint8_t)((m->color_id + (dir < 0 ? 7 : 1)) & 7); g_dirty = true; } break;
-            case 7: if (dir || (kDown & KEY_A)) { m->ai_rank = (uint8_t)((m->ai_rank + (dir < 0 ? 2 : 1)) % 3); if (m->ai_rank != AI_RANK_BOSS) { if (m->size_pct > 115) m->size_pct = 115; m->ranged_attack = 0; } g_dirty = true; } break;
+            case 7: if (dir || (kDown & KEY_A)) { m->ai_rank = (uint8_t)((m->ai_rank + (dir < 0 ? 2 : 1)) % 3); if (m->ai_rank != AI_RANK_BOSS && m->size_pct > 115) m->size_pct = 115; if (m->sight_range == 0 || (m->ai_rank == AI_RANK_BOSS && m->sight_range < 16)) m->sight_range = (m->ai_rank == AI_RANK_BOSS) ? 20 : (m->ai_rank == AI_RANK_CAPTAIN ? 16 : 13); g_dirty = true; } break;
             case 8:
-                if (m->ai_rank != AI_RANK_BOSS) {
-                    m->ranged_attack = 0;
-                    if (dir || (kDown & KEY_A)) snprintf(g_status, sizeof(g_status), "BOSS ONLY RANGED");
-                } else if (dir || (kDown & KEY_A)) {
-                    m->ranged_attack = m->ranged_attack ? 0 : 1;
-                    g_dirty = true;
-                }
+                if (dir || (kDown & KEY_A)) { m->ranged_attack = m->ranged_attack ? 0 : 1; g_dirty = true; }
                 break;
             case 9:
+                if (dir || big) { int step = big ? big * 2 : dir; m->melee_range = (uint8_t)clampi32((int)(m->melee_range ? m->melee_range : 7) + step, 2, 30); g_dirty = true; }
+                if (kDown & KEY_A) { m->melee_range = (uint8_t)prompt_int_value("Attack range x10", m->melee_range ? m->melee_range : 7, 2, 30); g_dirty = true; }
+                break;
+            case 10:
+                if (dir || big) { int step = big ? big * 2 : dir; m->attack_cooldown = (uint8_t)clampi32((int)(m->attack_cooldown ? m->attack_cooldown : 7) + step, 2, 60); g_dirty = true; }
+                if (kDown & KEY_A) { m->attack_cooldown = (uint8_t)prompt_int_value("Atk cooldown x10", m->attack_cooldown ? m->attack_cooldown : 7, 2, 60); g_dirty = true; }
+                break;
+            case 11:
                 if (dir || big) { int step = big ? big * 2 : dir; m->spawn_limit = (uint8_t)clampi32((int)m->spawn_limit + step, 0, 8); g_dirty = true; }
                 if (kDown & KEY_A) { m->spawn_limit = (uint8_t)prompt_int_value("Spawn limit", m->spawn_limit, 0, 8); g_dirty = true; }
                 break;
-            case 10: if (dir || (kDown & KEY_A)) { m->spawn_kind = m->spawn_kind ? AI_SPAWN_NONE : AI_SPAWN_GRUNT; g_dirty = true; } break;
-            case 11:
+            case 12: if (dir || (kDown & KEY_A)) { m->spawn_kind = m->spawn_kind ? AI_SPAWN_NONE : AI_SPAWN_GRUNT; g_dirty = true; } break;
+            case 13:
+                if (dir || big) { int step = big ? big * 5 : dir; m->spawn_cooldown = (uint8_t)clampi32((int)(m->spawn_cooldown ? m->spawn_cooldown : 25) + step, 5, 120); g_dirty = true; }
+                if (kDown & KEY_A) { m->spawn_cooldown = (uint8_t)prompt_int_value("Spawn cooldown x10", m->spawn_cooldown ? m->spawn_cooldown : 25, 5, 120); g_dirty = true; }
+                break;
+            case 14:
+                if (dir || big) { int step = big ? big * 4 : dir; m->sight_range = (uint8_t)clampi32((int)(m->sight_range ? m->sight_range : 13) + step, 2, 40); g_dirty = true; }
+                if (kDown & KEY_A) { m->sight_range = (uint8_t)prompt_int_value("Sight range", m->sight_range ? m->sight_range : 13, 2, 40); g_dirty = true; }
+                break;
+            case 15:
                 if (dir || big) { int step = big ? big * 4 : dir; m->command_range = (uint8_t)clampi32((int)(m->command_range ? m->command_range : 10) + step, 2, 32); g_dirty = true; }
                 if (kDown & KEY_A) { m->command_range = (uint8_t)prompt_int_value("Command range", m->command_range ? m->command_range : 10, 2, 32); g_dirty = true; }
                 break;
-            case 12: if (kDown & KEY_A) { ensure_enemy_sprite16_or_default(m->sprite16, m->sprite); open_sprite_editor(SPRITE_TARGET_ENEMY); } break;
-            case 13: if (kDown & KEY_A) { m->ai_rank = AI_RANK_BOSS; ensure_boss_sprite_or_default(m->boss_sprite); open_sprite_editor(SPRITE_TARGET_BOSS); g_dirty = true; } break;
-            case 14:
+            case 16: if (dir || (kDown & KEY_A)) { m->projectile_color = (uint8_t)((m->projectile_color + (dir < 0 ? 7 : 1)) & 7); g_dirty = true; } break;
+            case 17: if (dir || (kDown & KEY_A)) { m->projectile_style = (uint8_t)((m->projectile_style + (dir < 0 ? 2 : 1)) % 3); g_dirty = true; } break;
+            case 18: if (dir || (kDown & KEY_A)) { m->projectile_anim = m->projectile_anim ? 0 : 1; g_dirty = true; } break;
+            case 19: if (kDown & KEY_A) { ensure_enemy_sprite16_or_default(m->sprite16, m->sprite); open_sprite_editor(SPRITE_TARGET_ENEMY); } break;
+            case 20: if (kDown & KEY_A) { m->ai_rank = AI_RANK_BOSS; ensure_boss_sprite_or_default(m->boss_sprite); open_sprite_editor(SPRITE_TARGET_BOSS); g_dirty = true; } break;
+            case 21:
                 if (dir || big) { int step = big ? big * 5 : dir; g_player_health_max = clampi32(g_player_health_max + step, PLAYER_HEALTH_MIN, PLAYER_HEALTH_MAX); if (g_player_health > g_player_health_max) g_player_health = g_player_health_max; g_dirty = true; }
                 if (kDown & KEY_A) { g_player_health_max = prompt_int_value("Player max HP", g_player_health_max, PLAYER_HEALTH_MIN, PLAYER_HEALTH_MAX); if (g_player_health > g_player_health_max) g_player_health = g_player_health_max; g_dirty = true; }
                 break;
-            case 15: if (kDown & KEY_A) close_entity_editor(); break;
+            case 22: if (kDown & KEY_A) close_entity_editor(); break;
         }
-        if (m->ai_rank == AI_RANK_BOSS && m->spawn_limit == 0) m->spawn_limit = 2;
+        if (m->ai_rank == AI_RANK_BOSS && m->spawn_kind != AI_SPAWN_NONE && m->spawn_limit == 0) m->spawn_limit = 2;
         snprintf(g_status, sizeof(g_status), "%s HP%d ATK%d", ai_rank_name(m->ai_rank), m->hp, m->attack);
         return;
     }
@@ -1375,9 +1423,10 @@ static void attack_with_weapon(Level *lv, u32 kDown) {
     }
 
     g_attack_cooldown = ((float)w->cooldown) / 60.0f;
-    g_slash_type = (g_slash_type + 1) % 3;
-    g_slash_timer = 0.26f;
-    g_weapon_bounce_timer = 0.22f;
+    g_slash_type = (g_slash_type + 1 + g_current_weapon) % 3;
+    g_slash_total = clampf32(0.18f + ((float)w->cooldown / 220.0f), 0.20f, 0.38f);
+    g_slash_timer = g_slash_total;
+    g_weapon_bounce_timer = 0.16f + clampf32((float)w->range * 0.025f, 0.0f, 0.12f);
     if (best < 0) {
         snprintf(g_status, sizeof(g_status), "%s MISS", weapon_name(g_current_weapon));
         return;
@@ -1404,6 +1453,7 @@ static void attack_with_weapon(Level *lv, u32 kDown) {
 }
 
 void reset_runtime_entities(void) {
+    g_screen_shake_timer = 0.0f;
     memset(g_enemies, 0, sizeof(g_enemies));
     memset(g_collectibles, 0, sizeof(g_collectibles));
     memset(g_doors, 0, sizeof(g_doors));
@@ -1432,6 +1482,7 @@ void reset_runtime_entities(void) {
     g_current_weapon = -1;
     g_attack_cooldown = 0.0f;
     g_slash_timer = 0.0f;
+    g_slash_total = 0.26f;
     g_slash_type = 2;
     g_weapon_bounce_timer = 0.0f;
     g_has_success = false;
@@ -1466,13 +1517,20 @@ void spawn_entities_from_level(const Level *lv) {
                 e->spawn_kind = AI_SPAWN_NONE;
                 e->spawn_limit = 0;
                 e->command_range = 10;
+                e->sight_range = 13;
                 e->ranged_attack = 0;
+                e->melee_range = 7;
+                e->attack_cooldown = 7;
+                e->spawn_cooldown = 25;
+                e->projectile_style = 0;
+                e->projectile_anim = 1;
                 e->spawn_timer = 1.0f;
                 e->ranged_timer = 0.0f;
                 e->hp = 4 + ((x + y) % 4);
                 e->attack = 1;
                 EnemyMeta *meta = enemy_meta_find_at(x, y);
                 e->color_id = (uint8_t)((x + y) & 7);
+                e->projectile_color = e->color_id & 7;
                 copy_default_sprite(e->sprite, SPRITE_TARGET_ENEMY);
                 copy_default_enemy_sprite16(e->sprite16);
                 e->speed_attr = 100;
@@ -1486,7 +1544,14 @@ void spawn_entities_from_level(const Level *lv) {
                     e->spawn_kind = meta->spawn_kind;
                     e->spawn_limit = meta->spawn_limit;
                     e->command_range = meta->command_range ? meta->command_range : 10;
-                    e->ranged_attack = (e->ai_rank == AI_RANK_BOSS) ? meta->ranged_attack : 0;
+                    e->sight_range = meta->sight_range ? meta->sight_range : ((meta->ai_rank == AI_RANK_BOSS) ? 20 : (meta->ai_rank == AI_RANK_CAPTAIN ? 16 : 13));
+                    e->ranged_attack = meta->ranged_attack;
+                    e->melee_range = meta->melee_range ? meta->melee_range : ((meta->ai_rank == AI_RANK_BOSS) ? 10 : 7);
+                    e->attack_cooldown = meta->attack_cooldown ? meta->attack_cooldown : 7;
+                    e->spawn_cooldown = meta->spawn_cooldown ? meta->spawn_cooldown : 25;
+                    e->projectile_color = meta->projectile_color & 7;
+                    e->projectile_style = meta->projectile_style % 3;
+                    e->projectile_anim = meta->projectile_anim ? 1 : 0;
                     e->speed_attr = meta->speed_attr ? meta->speed_attr : 100;
                     e->size_pct = meta->size_pct ? meta->size_pct : (meta->ai_rank == AI_RANK_BOSS ? 118 : 100);
                     if (e->ai_rank != AI_RANK_BOSS && e->size_pct > 115) e->size_pct = 115;
@@ -1498,7 +1563,7 @@ void spawn_entities_from_level(const Level *lv) {
                     ensure_enemy_sprite16_or_default(e->sprite16, e->sprite);
                     ensure_boss_sprite_or_default(e->boss_sprite);
                     if (e->ai_rank == AI_RANK_BOSS && e->hp < 20) e->hp = 20;
-                    if (e->ai_rank == AI_RANK_BOSS && e->spawn_limit == 0) e->spawn_limit = 2;
+                    if (e->ai_rank == AI_RANK_BOSS && e->spawn_kind != AI_SPAWN_NONE && e->spawn_limit == 0) e->spawn_limit = 2;
                 }
                 e->hp_max = e->hp;
                 e->state = 0;
@@ -1668,6 +1733,7 @@ static void player_take_damage(Level *lv, int damage, const char *killer) {
 
     g_player_health -= dmg;
     g_player_hurt_timer = PLAYER_HURT_TIME;
+    if (g_screen_shake_enabled) g_screen_shake_timer = 0.30f;
     if (g_player_health <= 0) {
         g_player_health = 0;
         g_player_dead = true;
@@ -1680,7 +1746,7 @@ static void player_take_damage(Level *lv, int damage, const char *killer) {
 }
 
 static void spawn_boss_arrow(const Enemy *boss, const Level *lv) {
-    if (!boss || !lv || boss->ai_rank != AI_RANK_BOSS) return;
+    if (!boss || !lv) return;
     int idx = -1;
     for (int i = 0; i < MAX_PROJECTILES; i++) {
         if (!g_projectiles[i].active) { idx = i; break; }
@@ -1705,7 +1771,10 @@ static void spawn_boss_arrow(const Enemy *boss, const Level *lv) {
     pr->vy = dy * BOSS_ARROW_SPEED;
     pr->life = BOSS_ARROW_LIFE;
     pr->damage = boss->attack > 0 ? boss->attack : 2;
-    snprintf(pr->killer, sizeof(pr->killer), "BOSS ARROW");
+    pr->color_id = boss->projectile_color & 7;
+    pr->style = boss->projectile_style % 3;
+    pr->anim = boss->projectile_anim ? 1 : 0;
+    snprintf(pr->killer, sizeof(pr->killer), "%s SHOT", ai_rank_name(boss->ai_rank));
 }
 
 static void update_boss_projectiles(Level *lv, float dt) {
@@ -1766,18 +1835,85 @@ static void ai_pick_roam_angle(Enemy *e) {
 
 static bool ai_can_spot_player(const Level *lv, const Enemy *e, float to_px, float to_py, float dist2) {
     if (!lv || !e) return false;
-    const float sight_range = 13.0f;
+
+    float sight_range = (float)(e->sight_range ? e->sight_range :
+        (e->ai_rank == AI_RANK_BOSS ? 20 : (e->ai_rank == AI_RANK_CAPTAIN ? 16 : 13)));
+    sight_range = clampf32(sight_range, 2.0f, 40.0f);
     if (dist2 > sight_range * sight_range) return false;
     if (!ai_line_of_sight(lv, e->x, e->y, lv->player_x, lv->player_y)) return false;
 
-    if (dist2 < 2.25f) return true;
-
     float dist = sqrtf(dist2);
     if (dist < 0.001f) return true;
+
+    /* Close and already-alert enemies should not feel blind just because their
+       roam angle is facing away for a few frames. */
+    if (dist <= sight_range * 0.45f) return true;
+    if (e->state) return true;
+    if (e->ai_rank >= AI_RANK_CAPTAIN && dist <= sight_range * 0.70f) return true;
+
     float look_x = cosf(e->angle);
     float look_y = sinf(e->angle);
     float dot = (look_x * to_px + look_y * to_py) / dist;
-    return dot > 0.34f;
+
+    /* About a 200-degree cone: still directional, but not frustratingly narrow. */
+    return dot > -0.18f;
+}
+
+static float enemy_hit_radius(const Enemy *e) {
+    if (!e) return 0.18f;
+    float size = (float)(e->size_pct ? e->size_pct : 100) / 100.0f;
+    float base = (e->ai_rank == AI_RANK_BOSS) ? 0.36f : 0.22f;
+    return clampf32(base * size, 0.14f, 0.62f);
+}
+
+static bool ai_room_is_contained(uint8_t room) {
+    return room == ROOM_TREASURE || room == ROOM_BOSS || room == ROOM_TRAP ||
+           room == ROOM_ENEMY || room == ROOM_SAFE || room == ROOM_PUZZLE || room == ROOM_SECRET;
+}
+
+static bool ai_room_allows_player(const Level *lv, const Enemy *e) {
+    if (!lv || !e) return true;
+    uint8_t er = room_at(lv, (int)e->start_x, (int)e->start_y);
+    if (er == ROOM_NONE) er = room_at(lv, (int)e->x, (int)e->y);
+    uint8_t pr = room_at(lv, (int)lv->player_x, (int)lv->player_y);
+    if (pr == ROOM_SAFE) return false;
+    if (er == ROOM_NONE) return true;
+    if (er == ROOM_CORRIDOR) return pr == ROOM_CORRIDOR;
+    if (ai_room_is_contained(er)) return pr == er;
+    return pr == er || pr == ROOM_NONE;
+}
+
+static bool ai_can_enter_room(const Level *lv, const Enemy *e, float nx, float ny) {
+    if (!lv || !e) return true;
+    uint8_t er = room_at(lv, (int)e->start_x, (int)e->start_y);
+    if (er == ROOM_NONE) er = room_at(lv, (int)e->x, (int)e->y);
+    if (er == ROOM_NONE) return true;
+    uint8_t nr = room_at(lv, (int)nx, (int)ny);
+    if (er == ROOM_CORRIDOR) return nr == ROOM_CORRIDOR;
+    return nr == er;
+}
+
+static bool ai_position_clear_of_player(const Level *lv, float nx, float ny, const Enemy *self, float desired_stop) {
+    if (!lv || !self) return true;
+    float dx = nx - lv->player_x;
+    float dy = ny - lv->player_y;
+    float min_d = enemy_hit_radius(self) + PLAYER_RADIUS + 0.08f;
+    if (desired_stop > min_d) min_d = desired_stop * 0.82f;
+    return (dx * dx + dy * dy) >= min_d * min_d;
+}
+
+static bool ai_position_clear_of_enemies(int self_index, float nx, float ny, const Enemy *self) {
+    float r0 = enemy_hit_radius(self);
+    for (int j = 0; j < g_enemy_count; j++) {
+        if (j == self_index) continue;
+        const Enemy *o = &g_enemies[j];
+        if (!o->active || o->dying) continue;
+        float dx = nx - o->x;
+        float dy = ny - o->y;
+        float min_d = r0 + enemy_hit_radius(o);
+        if ((dx * dx + dy * dy) < min_d * min_d) return false;
+    }
+    return true;
 }
 
 static int ai_count_children_for_parent(int parent_index) {
@@ -1801,6 +1937,7 @@ static void ai_command_nearby_minions(Level *lv, int leader_index) {
         if (i == leader_index) continue;
         Enemy *m = &g_enemies[i];
         if (!m->active || m->dying || m->ai_rank >= leader->ai_rank) continue;
+        if (room_at(lv, (int)m->start_x, (int)m->start_y) != room_at(lv, (int)leader->start_x, (int)leader->start_y)) continue;
         float dx = m->x - leader->x;
         float dy = m->y - leader->y;
         if (dx * dx + dy * dy > range2) continue;
@@ -1824,6 +1961,9 @@ static bool ai_spawn_minion_for_boss(Level *lv, int parent_index) {
         float nx = boss->x + cosf(ang) * dist;
         float ny = boss->y + sinf(ang) * dist;
         if (!can_stand_at(lv, nx, ny, boss->z)) continue;
+        if (!ai_can_enter_room(lv, boss, nx, ny)) continue;
+        if (!ai_position_clear_of_enemies(parent_index, nx, ny, boss)) continue;
+        if (!ai_position_clear_of_player(lv, nx, ny, boss, 0.0f)) continue;
 
         Enemy *e = &g_enemies[g_enemy_count++];
         memset(e, 0, sizeof(*e));
@@ -1842,10 +1982,21 @@ static bool ai_spawn_minion_for_boss(Level *lv, int parent_index) {
         e->spawn_kind = AI_SPAWN_NONE;
         e->spawn_limit = 0;
         e->command_range = 8;
+        e->sight_range = boss->sight_range ? boss->sight_range : 13;
         e->ranged_attack = 0;
+        e->melee_range = boss->melee_range ? boss->melee_range : 7;
+        e->attack_cooldown = boss->attack_cooldown ? boss->attack_cooldown : 7;
+        e->spawn_cooldown = 25;
+        e->projectile_color = boss->projectile_color & 7;
+        e->projectile_style = boss->projectile_style;
+        e->projectile_anim = boss->projectile_anim;
         e->parent_index = parent_index;
         e->color_id = (uint8_t)((boss->color_id + 1) & 7);
         copy_default_sprite(e->sprite, SPRITE_TARGET_ENEMY);
+        copy_default_enemy_sprite16(e->sprite16);
+        ensure_enemy_sprite16_or_default(e->sprite16, e->sprite);
+        e->size_pct = boss->size_pct ? (uint8_t)clampi32((int)boss->size_pct - 20, 70, 105) : 90;
+        e->speed_attr = boss->speed_attr ? boss->speed_attr : 100;
         e->text_count = 1;
         snprintf(e->text[0], sizeof(e->text[0]), "MINION");
         e->text_timer = 0.9f;
@@ -1899,44 +2050,66 @@ static void update_enemies(Level *lv, float dt) {
             if (((g_frame_counter + (uint32_t)i) & 3u) != 0u) continue;
         }
 
-        if (dist2 < 0.18f && e->ranged_timer <= 0.0f) {
+        bool room_ok = ai_room_allows_player(lv, e);
+        float hit_r = enemy_hit_radius(e);
+        float melee_range = ((float)(e->melee_range ? e->melee_range : 7) * 0.10f) + hit_r + PLAYER_RADIUS;
+        if (room_ok && dist2 < melee_range * melee_range && e->ranged_timer <= 0.0f && ai_line_of_sight(lv, e->x, e->y, lv->player_x, lv->player_y)) {
             int atk = e->attack > 0 ? e->attack : 1;
-            e->ranged_timer = 0.70f;
+            e->ranged_timer = (float)(e->attack_cooldown ? e->attack_cooldown : 7) * 0.10f;
             e->text_timer = 1.0f;
             player_take_damage(lv, atk, ai_rank_name(e->ai_rank));
             return;
         }
 
-        bool chase = ai_can_spot_player(lv, e, to_px, to_py, dist2) || e->state;
+        bool chase = room_ok && (ai_can_spot_player(lv, e, to_px, to_py, dist2) || e->state);
+        if (!room_ok) e->state = 0;
         float dir_x;
         float dir_y;
+        float dist = dist2 > 0.0001f ? sqrtf(dist2) : 0.0f;
+        float stop_range = melee_range * 0.86f;
+        float body_space = hit_r + PLAYER_RADIUS + 0.16f;
+        if (stop_range < body_space) stop_range = body_space;
+        if (e->ranged_attack && stop_range < 3.0f) stop_range = 3.0f;
 
         if (e->ai_rank >= AI_RANK_CAPTAIN) ai_command_nearby_minions(lv, i);
 
         if (e->ai_rank == AI_RANK_BOSS && e->spawn_kind != AI_SPAWN_NONE && e->spawn_limit > 0) {
             e->spawn_timer -= dt;
             if (e->spawn_timer <= 0.0f) {
-                e->spawn_timer = 2.25f + (float)((rng_next(&g_random_seed) & 255) / 255.0f);
+                e->spawn_timer = ((float)(e->spawn_cooldown ? e->spawn_cooldown : 25) * 0.10f) + (float)((rng_next(&g_random_seed) & 255) / 255.0f);
                 if (dist2 < (22.0f * 22.0f)) ai_spawn_minion_for_boss(lv, i);
             }
         }
 
-        if (e->ai_rank == AI_RANK_BOSS && e->ranged_attack && chase && e->ranged_timer <= 0.0f &&
+        if (e->ranged_attack && chase && e->ranged_timer <= 0.0f &&
             dist2 > 2.25f && dist2 < (12.0f * 12.0f) &&
             ai_line_of_sight(lv, e->x, e->y, lv->player_x, lv->player_y)) {
-            e->ranged_timer = 1.15f;
+            float cd = (float)(e->attack_cooldown ? e->attack_cooldown : 11) * 0.10f;
+            if (cd < 0.45f) cd = 0.45f;
+            e->ranged_timer = cd + 0.35f;
             e->text_timer = 1.0f;
             spawn_boss_arrow(e, lv);
-            snprintf(g_status, sizeof(g_status), "BOSS ARROW!");
+            snprintf(g_status, sizeof(g_status), "%s SHOT!", ai_rank_name(e->ai_rank));
         }
 
         if (chase && dist2 > 0.001f) {
-            float inv_dist = 1.0f / sqrtf(dist2);
+            float inv_dist = dist > 0.0001f ? (1.0f / dist) : 0.0f;
             dir_x = to_px * inv_dist;
             dir_y = to_py * inv_dist;
             e->angle = atan2f(dir_y, dir_x);
             if (!e->state && e->text_count > 0) e->text_timer = 1.0f;
             e->state = 1;
+
+            /* Do not keep pushing into the player. If overlapping, back out.
+               If within attack range, hold position and attack from there. */
+            float overlap_space = hit_r + PLAYER_RADIUS + 0.06f;
+            if (dist < overlap_space) {
+                dir_x = -dir_x;
+                dir_y = -dir_y;
+            } else if (dist <= stop_range) {
+                dir_x = 0.0f;
+                dir_y = 0.0f;
+            }
         } else {
             e->state = 0;
             e->roam_timer -= dt;
@@ -1946,21 +2119,28 @@ static void update_enemies(Level *lv, float dt) {
         }
 
         float rank_speed = (e->ai_rank == AI_RANK_BOSS) ? 0.82f : (e->ai_rank == AI_RANK_CAPTAIN ? 1.08f : 1.0f);
-        float step = e->speed * rank_speed * (chase ? 1.28f : 0.48f) * dt;
+        float attr_speed = clampf32((float)(e->speed_attr ? e->speed_attr : 100) / 100.0f, 0.25f, 2.20f);
+        float step = e->speed * attr_speed * rank_speed * (chase ? 1.28f : 0.48f) * dt;
         float nx = e->x + dir_x * step;
         float ny = e->y + dir_y * step;
         bool moved = false;
 
-        if (can_stand_at(lv, nx, e->y, e->z)) {
+        if (fabsf(dir_x) > 0.0001f &&
+            can_stand_at(lv, nx, e->y, e->z) && ai_can_enter_room(lv, e, nx, e->y) &&
+            ai_position_clear_of_player(lv, nx, e->y, e, stop_range) &&
+            ai_position_clear_of_enemies(i, nx, e->y, e)) {
             e->x = nx;
             moved = true;
         }
-        if (can_stand_at(lv, e->x, ny, e->z)) {
+        if (fabsf(dir_y) > 0.0001f &&
+            can_stand_at(lv, e->x, ny, e->z) && ai_can_enter_room(lv, e, e->x, ny) &&
+            ai_position_clear_of_player(lv, e->x, ny, e, stop_range) &&
+            ai_position_clear_of_enemies(i, e->x, ny, e)) {
             e->y = ny;
             moved = true;
         }
 
-        if (!moved) {
+        if (!moved && (fabsf(dir_x) > 0.0001f || fabsf(dir_y) > 0.0001f)) {
             if (chase) e->angle += 0.75f;
             ai_pick_roam_angle(e);
         }
@@ -2244,6 +2424,8 @@ static void reset_settings_defaults(void) {
     g_bob_phase = 0.0f;
     g_bob_amount = 0.0f;
     g_camera_speed = 0.0f;
+    g_screen_shake_enabled = true;
+    g_settings_scroll = 0;
     g_settings_dirty = true;
     snprintf(g_status, sizeof(g_status), "SETTINGS DEFAULTS");
 }
@@ -2294,8 +2476,21 @@ static void adjust_setting(int dir) {
             snprintf(g_status, sizeof(g_status), "DEBUG %s", g_debug_overlay ? "ON" : "OFF");
             break;
         case 10:
+            g_screen_shake_enabled = !g_screen_shake_enabled;
+            if (!g_screen_shake_enabled) g_screen_shake_timer = 0.0f;
+            snprintf(g_status, sizeof(g_status), "SHAKE %s", g_screen_shake_enabled ? "ON" : "OFF");
+            break;
+        case 11:
             g_default_npc_color = (uint8_t)((g_default_npc_color + (dir > 0 ? 1 : 7)) & 7);
             snprintf(g_status, sizeof(g_status), "DEFAULT NPC COLOR %d", g_default_npc_color);
+            break;
+        case 12:
+            snprintf(g_status, sizeof(g_status), "DEFAULT ART USE NPC EDIT");
+            break;
+        case 13:
+            g_player_health_max = clampi32(g_player_health_max + dir, PLAYER_HEALTH_MIN, PLAYER_HEALTH_MAX);
+            if (g_player_health > g_player_health_max) g_player_health = g_player_health_max;
+            snprintf(g_status, sizeof(g_status), "PLAYER HP %d", g_player_health_max);
             break;
     }
 
@@ -2303,8 +2498,13 @@ static void adjust_setting(int dir) {
 }
 
 static void handle_settings_menu_input(u32 kDown) {
+    const int visible_rows = 10;
     if (kDown & KEY_DUP) g_settings_cursor = (g_settings_cursor + SETTINGS_ROW_COUNT - 1) % SETTINGS_ROW_COUNT;
     if (kDown & KEY_DDOWN) g_settings_cursor = (g_settings_cursor + 1) % SETTINGS_ROW_COUNT;
+    if (g_settings_cursor < g_settings_scroll) g_settings_scroll = g_settings_cursor;
+    if (g_settings_cursor >= g_settings_scroll + visible_rows) g_settings_scroll = g_settings_cursor - visible_rows + 1;
+    if (g_settings_scroll < 0) g_settings_scroll = 0;
+    if (g_settings_scroll > SETTINGS_ROW_COUNT - visible_rows) g_settings_scroll = SETTINGS_ROW_COUNT - visible_rows;
 
     if (kDown & KEY_DLEFT) adjust_setting(-1);
     if (kDown & KEY_DRIGHT) adjust_setting(1);
@@ -2415,6 +2615,7 @@ void handle_world_menu_input(u32 kDown) {
                 break;
             case MENU_ACTION_SETTINGS:
                 g_settings_menu = true;
+                g_settings_scroll = 0;
                 g_delete_armed = false;
                 snprintf(g_status, sizeof(g_status), "SETTINGS");
                 break;
@@ -2432,6 +2633,10 @@ void update_physics_and_movement(float dt, u32 kDown, u32 kHeld) {
     if (g_weapon_bounce_timer > 0.0f) {
         g_weapon_bounce_timer -= dt;
         if (g_weapon_bounce_timer < 0.0f) g_weapon_bounce_timer = 0.0f;
+    }
+    if (g_screen_shake_timer > 0.0f) {
+        g_screen_shake_timer -= dt;
+        if (g_screen_shake_timer < 0.0f) g_screen_shake_timer = 0.0f;
     }
 
     if (g_level_won) {
@@ -2515,6 +2720,17 @@ static bool handle_editor_touch_controls(const Level *lv, const touchPosition *t
     /* Left panel is the 4x4 tile palette. */
     if (tp->px < 100) return false;
 
+    if (touch_in_rect(tp, 188, 188, 216, 206)) {
+        g_editor_tool = (g_editor_tool + 1) % 3;
+        snprintf(g_status, sizeof(g_status), "TOOL %s", editor_tool_name(g_editor_tool));
+        return true;
+    }
+    if (touch_in_rect(tp, 188, 210, 216, 232)) {
+        g_selected_room = (uint8_t)((g_selected_room + 1) % (MAX_ROOM_ID + 1));
+        snprintf(g_status, sizeof(g_status), "ROOM %s", room_class_name(g_selected_room));
+        return true;
+    }
+
     if (touch_in_rect(tp, 108, 188, 144, 206)) {
         editor_zoom_out(lv);
         return true;
@@ -2590,6 +2806,22 @@ void editor_touch(u32 kDown, u32 kHeld) {
     if (x < 0 || y < 0 || x >= lv->width || y >= lv->height) return;
 
     uint8_t cur_tile = tile_at(lv, x, y);
+    if (g_editor_tool == EDITOR_TOOL_SELECT) {
+        if (cur_tile == TILE_AI_SPAWN || cur_tile == TILE_NPC) {
+            open_entity_editor_at(x, y);
+        } else {
+            g_selected_tile = cur_tile;
+            snprintf(g_status, sizeof(g_status), "SELECT %d,%d %s R:%s", x, y, tile_short_name(cur_tile), room_class_name(room_at(lv, x, y)));
+        }
+        return;
+    }
+    if (g_editor_tool == EDITOR_TOOL_ROOM) {
+        uint8_t old_room = room_at(lv, x, y);
+        set_room(lv, x, y, g_selected_room);
+        if (old_room != g_selected_room) g_dirty = true;
+        snprintf(g_status, sizeof(g_status), "ROOM %d,%d %s", x, y, room_class_name(g_selected_room));
+        return;
+    }
     if ((cur_tile == TILE_AI_SPAWN || cur_tile == TILE_NPC) && (kHeld & KEY_A)) {
         open_entity_editor_at(x, y);
         return;
@@ -2710,12 +2942,22 @@ void handle_editor_input(float dt, u32 kDown, u32 kHeld) {
     if (kDown & KEY_DDOWN) editor_zoom_out(&g_level);
 
     if (kDown & KEY_DLEFT) {
-        g_selected_tile = (uint8_t)((g_selected_tile + MAX_TILE_ID) % (MAX_TILE_ID + 1));
-        snprintf(g_status, sizeof(g_status), "%s", tile_short_name(g_selected_tile));
+        if (g_editor_tool == EDITOR_TOOL_ROOM) {
+            g_selected_room = (uint8_t)((g_selected_room + MAX_ROOM_ID) % (MAX_ROOM_ID + 1));
+            snprintf(g_status, sizeof(g_status), "ROOM %s", room_class_name(g_selected_room));
+        } else {
+            g_selected_tile = (uint8_t)((g_selected_tile + MAX_TILE_ID) % (MAX_TILE_ID + 1));
+            snprintf(g_status, sizeof(g_status), "%s", tile_short_name(g_selected_tile));
+        }
     }
     if (kDown & KEY_DRIGHT) {
-        g_selected_tile = (uint8_t)((g_selected_tile + 1) % (MAX_TILE_ID + 1));
-        snprintf(g_status, sizeof(g_status), "%s", tile_short_name(g_selected_tile));
+        if (g_editor_tool == EDITOR_TOOL_ROOM) {
+            g_selected_room = (uint8_t)((g_selected_room + 1) % (MAX_ROOM_ID + 1));
+            snprintf(g_status, sizeof(g_status), "ROOM %s", room_class_name(g_selected_room));
+        } else {
+            g_selected_tile = (uint8_t)((g_selected_tile + 1) % (MAX_TILE_ID + 1));
+            snprintf(g_status, sizeof(g_status), "%s", tile_short_name(g_selected_tile));
+        }
     }
 
     update_editor_player(dt, kHeld);
