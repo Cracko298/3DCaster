@@ -61,7 +61,7 @@ bool encode_bwl2_memory(const Level *lv, uint8_t **out_data, size_t *out_size) {
 
     ok = ok && mem_put_u8(out, cap, &pos, 'B');
     ok = ok && mem_put_u8(out, cap, &pos, 'W');
-    ok = ok && mem_put_u8(out, cap, &pos, '3');
+    ok = ok && mem_put_u8(out, cap, &pos, '4');
     ok = ok && mem_put_u16_le(out, cap, &pos, lv->width);
     ok = ok && mem_put_u16_le(out, cap, &pos, lv->height);
     ok = ok && mem_put_u16_le(out, cap, &pos, qpos(lv->player_x));
@@ -113,6 +113,11 @@ bool encode_bwl2_memory(const Level *lv, uint8_t **out_data, size_t *out_size) {
     out[tile_size_pos + 2] = (uint8_t)((tile_size >> 16) & 0xFF);
     out[tile_size_pos + 3] = (uint8_t)((tile_size >> 24) & 0xFF);
 
+    /* BWL4 room class overlay. Values are per tile and optional for older saves. */
+    ok = ok && mem_put_u8(out, cap, &pos, 'R') && mem_put_u8(out, cap, &pos, 'O') && mem_put_u8(out, cap, &pos, 'M') && mem_put_u8(out, cap, &pos, '4');
+    ok = ok && mem_put_u32_le(out, cap, &pos, (uint32_t)n);
+    for (int ri = 0; ok && ri < n; ri++) ok = ok && mem_put_u8(out, cap, &pos, g_room_tiles[ri] <= MAX_ROOM_ID ? g_room_tiles[ri] : ROOM_NONE);
+
     /* World/player metadata */
     ok = ok && mem_put_u8(out, cap, &pos, 'W') && mem_put_u8(out, cap, &pos, 'L') && mem_put_u8(out, cap, &pos, 'D') && mem_put_u8(out, cap, &pos, '5');
     ok = ok && mem_put_u8(out, cap, &pos, (uint8_t)clampi32(g_player_health_max, PLAYER_HEALTH_MIN, PLAYER_HEALTH_MAX));
@@ -144,7 +149,7 @@ bool encode_bwl2_memory(const Level *lv, uint8_t **out_data, size_t *out_size) {
     }
 
     /* Enemy metadata chunk with stats + text + hierarchy/boss data */
-    ok = ok && mem_put_u8(out, cap, &pos, 'E') && mem_put_u8(out, cap, &pos, 'N') && mem_put_u8(out, cap, &pos, 'M') && mem_put_u8(out, cap, &pos, '5');
+    ok = ok && mem_put_u8(out, cap, &pos, 'E') && mem_put_u8(out, cap, &pos, 'N') && mem_put_u8(out, cap, &pos, 'M') && mem_put_u8(out, cap, &pos, '7');
     int em_count = (lv == &g_level) ? g_enemy_meta_count : 0;
     if (em_count < 0) em_count = 0;
     if (em_count > MAX_ENEMIES) em_count = MAX_ENEMIES;
@@ -161,8 +166,15 @@ bool encode_bwl2_memory(const Level *lv, uint8_t **out_data, size_t *out_size) {
         ok = ok && mem_put_u8(out, cap, &pos, m->ai_rank);
         ok = ok && mem_put_u8(out, cap, &pos, m->spawn_kind);
         ok = ok && mem_put_u8(out, cap, &pos, m->spawn_limit);
-        ok = ok && mem_put_u8(out, cap, &pos, m->command_range);
+        ok = ok && mem_put_u8(out, cap, &pos, m->command_range ? m->command_range : 10);
+        ok = ok && mem_put_u8(out, cap, &pos, m->sight_range ? m->sight_range : (m->ai_rank == AI_RANK_BOSS ? 20 : (m->ai_rank == AI_RANK_CAPTAIN ? 16 : 13)));
         ok = ok && mem_put_u8(out, cap, &pos, m->ranged_attack);
+        ok = ok && mem_put_u8(out, cap, &pos, m->melee_range ? m->melee_range : 7);
+        ok = ok && mem_put_u8(out, cap, &pos, m->attack_cooldown ? m->attack_cooldown : 7);
+        ok = ok && mem_put_u8(out, cap, &pos, m->spawn_cooldown ? m->spawn_cooldown : 25);
+        ok = ok && mem_put_u8(out, cap, &pos, m->projectile_color & 7);
+        ok = ok && mem_put_u8(out, cap, &pos, m->projectile_style % 3);
+        ok = ok && mem_put_u8(out, cap, &pos, m->projectile_anim ? 1 : 0);
         ok = ok && mem_put_u8(out, cap, &pos, m->speed_attr ? m->speed_attr : 100);
         ok = ok && mem_put_u8(out, cap, &pos, m->size_pct ? m->size_pct : (m->ai_rank == AI_RANK_BOSS ? 118 : 100));
         ok = ok && mem_put_u8(out, cap, &pos, m->text_speed <= TEXT_SPEED_FAST ? m->text_speed : TEXT_SPEED_MEDIUM);
@@ -412,6 +424,13 @@ static void normalize_enemy_meta_defaults(EnemyMeta *m) {
     if (m->spawn_kind > AI_SPAWN_GRUNT) m->spawn_kind = AI_SPAWN_NONE;
     if (m->spawn_limit > 8) m->spawn_limit = 8;
     if (m->command_range == 0) m->command_range = 10;
+    if (m->sight_range == 0) m->sight_range = (m->ai_rank == AI_RANK_BOSS) ? 20 : (m->ai_rank == AI_RANK_CAPTAIN ? 16 : 13);
+    if (m->sight_range > 40) m->sight_range = 40;
+    if (!m->melee_range) m->melee_range = (m->ai_rank == AI_RANK_BOSS) ? 10 : 7;
+    if (!m->attack_cooldown) m->attack_cooldown = 7;
+    if (!m->spawn_cooldown) m->spawn_cooldown = 25;
+    m->projectile_color &= 7;
+    if (m->projectile_style > 2) m->projectile_style = 0;
     if (!m->speed_attr) m->speed_attr = 100;
     if (!m->size_pct) m->size_pct = (m->ai_rank == AI_RANK_BOSS) ? 118 : 100;
     if (m->ai_rank != AI_RANK_BOSS && m->size_pct > 115) m->size_pct = 115;
@@ -421,6 +440,7 @@ static void normalize_enemy_meta_defaults(EnemyMeta *m) {
 static void reset_level_metadata_defaults(void) {
     memset(g_npcs, 0, sizeof(g_npcs));
     memset(g_enemy_metas, 0, sizeof(g_enemy_metas));
+    clear_room_overlay();
     g_npc_count = 0;
     g_enemy_meta_count = 0;
     g_loaded_npc_metadata = false;
@@ -438,7 +458,18 @@ static void parse_bw3_chunks(const uint8_t *p, size_t size) {
         pos += 4;
         if (a == 'E' && b == 'N' && c == 'D' && d == '!') break;
 
-        if (a == 'W' && b == 'L' && c == 'D' && d == '5') {
+        if (a == 'R' && b == 'O' && c == 'M' && d == '4') {
+            if (pos + 4 > size) break;
+            uint32_t count = read_u32_le(p + pos); pos += 4;
+            uint32_t max_count = (uint32_t)(g_load_temp.width * g_load_temp.height);
+            if (count > MAX_TILES || pos + count > size) break;
+            memset(g_room_tiles, 0, sizeof(g_room_tiles));
+            uint32_t copy_count = count < max_count ? count : max_count;
+            for (uint32_t ri = 0; ri < count; ri++) {
+                uint8_t rv = p[pos++] & 0x0F;
+                if (ri < copy_count) g_room_tiles[ri] = rv <= MAX_ROOM_ID ? rv : ROOM_NONE;
+            }
+        } else if (a == 'W' && b == 'L' && c == 'D' && d == '5') {
             if (pos >= size) break;
             g_player_health_max = clampi32(p[pos++], PLAYER_HEALTH_MIN, PLAYER_HEALTH_MAX);
             if (g_player_health <= 0 || g_player_health > g_player_health_max) g_player_health = g_player_health_max;
@@ -507,11 +538,11 @@ static void parse_bw3_chunks(const uint8_t *p, size_t size) {
                 save_expand_8x8_to_16(n->sprite16, n->sprite);
             }
             g_loaded_npc_metadata = true;
-        } else if (a == 'E' && b == 'N' && c == 'M' && d == '5') {
+        } else if (a == 'E' && b == 'N' && c == 'M' && (d == '7' || d == '6' || d == '5')) {
             if (pos >= size) break;
             int count = p[pos++];
             if (count > MAX_ENEMIES) count = MAX_ENEMIES;
-            for (int i = 0; i < count && g_enemy_meta_count < MAX_ENEMIES && pos + 180 <= size; i++) {
+            for (int i = 0; i < count && g_enemy_meta_count < MAX_ENEMIES && pos + (d == '7' ? 190 : (d == '6' ? 189 : 183)) <= size; i++) {
                 EnemyMeta *m = &g_enemy_metas[g_enemy_meta_count++];
                 memset(m, 0, sizeof(*m));
                 m->active = true;
@@ -526,7 +557,24 @@ static void parse_bw3_chunks(const uint8_t *p, size_t size) {
                 m->spawn_kind = p[pos++];
                 m->spawn_limit = p[pos++];
                 m->command_range = p[pos++];
+                if (d == '7') m->sight_range = p[pos++];
+                else m->sight_range = 0;
                 m->ranged_attack = p[pos++] ? 1 : 0;
+                if (d == '7' || d == '6') {
+                    m->melee_range = p[pos++];
+                    m->attack_cooldown = p[pos++];
+                    m->spawn_cooldown = p[pos++];
+                    m->projectile_color = p[pos++] & 7;
+                    m->projectile_style = p[pos++] % 3;
+                    m->projectile_anim = p[pos++] ? 1 : 0;
+                } else {
+                    m->melee_range = 0;
+                    m->attack_cooldown = 0;
+                    m->spawn_cooldown = 0;
+                    m->projectile_color = m->color_id & 7;
+                    m->projectile_style = 0;
+                    m->projectile_anim = 1;
+                }
                 m->speed_attr = p[pos++];
                 m->size_pct = p[pos++];
                 m->text_speed = p[pos++];
@@ -563,6 +611,7 @@ static void parse_bw3_chunks(const uint8_t *p, size_t size) {
                 m->spawn_kind = p[pos++];
                 m->spawn_limit = p[pos++];
                 m->command_range = p[pos++];
+                m->sight_range = 0;
                 m->ranged_attack = p[pos++] ? 1 : 0;
                 uint16_t legacy[BOSS_LEGACY_SPRITE_ROWS]; memset(legacy, 0, sizeof(legacy));
                 for (int bi = 0; bi < BOSS_LEGACY_SPRITE_ROWS && pos + 1 < size; bi++) { legacy[bi] = read_u16_le(p + pos); pos += 2; }
@@ -606,7 +655,8 @@ static void parse_bw3_chunks(const uint8_t *p, size_t size) {
                     if (d == '3') { m->color_id = p[pos++]; for (int si = 0; si < SPRITE_BYTES && pos < size; si++) m->sprite[si] = p[pos++]; }
                     else { m->color_id = (uint8_t)((m->x + m->y) & 7); copy_default_sprite(m->sprite, SPRITE_TARGET_ENEMY); }
                 }
-                m->ai_rank = AI_RANK_GRUNT; m->spawn_kind = AI_SPAWN_NONE; m->spawn_limit = 0; m->command_range = 10; m->ranged_attack = 0;
+                m->ai_rank = AI_RANK_GRUNT; m->spawn_kind = AI_SPAWN_NONE; m->spawn_limit = 0; m->command_range = 10; m->sight_range = 13; m->ranged_attack = 0;
+                m->melee_range = 7; m->attack_cooldown = 7; m->spawn_cooldown = 25; m->projectile_color = m->color_id & 7; m->projectile_style = 0; m->projectile_anim = 1;
                 m->speed_attr = 100; m->size_pct = 100; m->text_speed = TEXT_SPEED_MEDIUM;
                 save_expand_8x8_to_16(m->sprite16, m->sprite);
                 copy_default_boss_sprite(m->boss_sprite);
@@ -663,7 +713,7 @@ bool parse_bwl_data(const uint8_t *data, size_t len, Level *lv) {
     bool ok = false;
     Level *tmp = &g_load_temp;
 
-    if (len >= 19 && data[0] == 'B' && data[1] == 'W' && data[2] == '3') {
+    if (len >= 19 && data[0] == 'B' && data[1] == 'W' && (data[2] == '3' || data[2] == '4')) {
         uint16_t width = read_u16_le(data + 3);
         uint16_t height = read_u16_le(data + 5);
         uint32_t tile_size = read_u32_le(data + 15);
@@ -716,7 +766,7 @@ bool parse_bwl_data(const uint8_t *data, size_t len, Level *lv) {
     }
 
     if (ok) {
-        if (lv == &g_level && !(len >= 19 && data[0] == 'B' && data[1] == 'W' && data[2] == '3')) reset_level_metadata_defaults();
+        if (lv == &g_level && !(len >= 19 && data[0] == 'B' && data[1] == 'W' && (data[2] == '3' || data[2] == '4'))) reset_level_metadata_defaults();
         force_valid_spawn(tmp);
         *lv = *tmp;
     }
@@ -991,6 +1041,7 @@ static bool parse_app_settings_text(const char *txt) {
     int aa = 0;
     int fast = 0;
     int debug = 0;
+    int shake = 1;
     int defnpc = 0;
 
     const char *p = txt;
@@ -1015,6 +1066,8 @@ static bool parse_app_settings_text(const char *txt) {
             /* handled */
         } else if (sscanf(p, "DEBUG %d", &debug) == 1) {
             /* handled */
+        } else if (sscanf(p, "SHAKE %d", &shake) == 1) {
+            /* handled */
         } else if (sscanf(p, "DEFAULTNPC %d", &defnpc) == 1) {
             /* handled */
         } else if (strncmp(p, "DEFAULTNPCSPRITE16 ", 19) == 0) {
@@ -1038,6 +1091,7 @@ static bool parse_app_settings_text(const char *txt) {
     g_antialiasing = aa != 0;
     g_fast_render = fast != 0;
     g_debug_overlay = debug != 0;
+    g_screen_shake_enabled = shake != 0;
     g_default_npc_color = (uint8_t)(defnpc & 7);
     bool def16_empty = true;
     for (int si = 0; si < ENEMY_SPRITE_ROWS; si++) if (g_default_npc_sprite16[si]) def16_empty = false;
@@ -1090,7 +1144,7 @@ bool save_app_settings(void) {
 
     char buf[768];
     int n = snprintf(buf, sizeof(buf),
-                     "3DCASTERCFG1\nFOV %.1f\nDEPTH %.2f\nBOB %d\nSTEREO3D %d\nDOF %d\nDOFSTART %.1f\nDOFSTRENGTH %.2f\nAA %d\nFAST %d\nDEBUG %d\nDEFAULTNPC %d\nDEFAULTNPCSPRITE %s\nDEFAULTNPCSPRITE16 %s\n",
+                     "3DCASTERCFG1\nFOV %.1f\nDEPTH %.2f\nBOB %d\nSTEREO3D %d\nDOF %d\nDOFSTART %.1f\nDOFSTRENGTH %.2f\nAA %d\nFAST %d\nDEBUG %d\nSHAKE %d\nDEFAULTNPC %d\nDEFAULTNPCSPRITE %s\nDEFAULTNPCSPRITE16 %s\n",
                      g_fov_degrees,
                      g_level_depth,
                      g_view_bob ? 1 : 0,
@@ -1101,6 +1155,7 @@ bool save_app_settings(void) {
                      g_antialiasing ? 1 : 0,
                      g_fast_render ? 1 : 0,
                      g_debug_overlay ? 1 : 0,
+                     g_screen_shake_enabled ? 1 : 0,
                      g_default_npc_color & 7,
                      sprite_hex,
                      sprite16_hex);
