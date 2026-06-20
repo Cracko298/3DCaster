@@ -1,5 +1,7 @@
 #include "common.h"
 
+static const char *room_class_short_name(uint8_t room);
+
 void draw_sky_floor(u8 *fb) {
     fill_rect_raw(fb, TOP_W, TOP_H, 0, 0, TOP_W, TOP_H / 2, (Color){60, 92, 145});
     fill_rect_raw(fb, TOP_W, TOP_H, 0, TOP_H / 2, TOP_W, TOP_H, (Color){45, 42, 38});
@@ -232,6 +234,14 @@ static const uint8_t HEART_SPRITE_8X8[8] = {
 
 static const uint8_t ARROW_SPRITE_8X8[8] = {
     0x10, 0x18, 0x1C, 0xFE, 0xFE, 0x1C, 0x18, 0x10
+};
+
+static const uint8_t ORB_SPRITE_8X8[8] = {
+    0x00, 0x3C, 0x7E, 0xDB, 0xFF, 0x7E, 0x3C, 0x00
+};
+
+static const uint8_t WAVE_SPRITE_8X8[8] = {
+    0x18, 0x3C, 0x7E, 0xDB, 0xDB, 0x7E, 0x3C, 0x18
 };
 
 static int typed_visible_len(const char *text, uint8_t speed, float elapsed) {
@@ -959,7 +969,7 @@ static void draw_crosshair_and_slash(u8 *fb) {
     int cy = TOP_H / 2;
 
     if (g_slash_timer > 0.0f && !g_render_angle_override) {
-        const float total = 0.26f;
+        const float total = (g_slash_total > 0.05f) ? g_slash_total : 0.26f;
         float age = 1.0f - clampf32(g_slash_timer / total, 0.0f, 1.0f);
         int head = (int)(age * 42.0f);
         int tail = head - 18;
@@ -967,8 +977,9 @@ static void draw_crosshair_and_slash(u8 *fb) {
         if (head > 41) head = 41;
 
         Color core = (Color){255, 248, 205};
-        Color mid = (Color){210, 188, 120};
-        Color glow = (Color){74, 58, 34};
+        if (g_current_weapon >= 0 && g_current_weapon < MAX_WEAPONS) core = npc_color_for(g_weapons[g_current_weapon].color_id);
+        Color mid = (Color){(uint8_t)((core.r + 255) / 2), (uint8_t)((core.g + 235) / 2), (uint8_t)((core.b + 170) / 2)};
+        Color glow = (Color){(uint8_t)(core.r / 4), (uint8_t)(core.g / 4), (uint8_t)(core.b / 4)};
 
         for (int i = tail; i <= head; i++) {
             float u = ((float)i) / 41.0f;
@@ -1044,6 +1055,11 @@ static void render_raycast_eye(const Level *lv, gfx3dSide_t side, float eye_offs
         bob_y = sinf(g_bob_phase) * g_bob_amount;
     }
     float center_y = RENDER_H * 0.5f + (g_render_angle_override ? 0.0f : g_camera_pitch) + bob_y;
+    if (!g_render_angle_override && g_screen_shake_enabled && g_screen_shake_timer > 0.0f) {
+        float shake = g_screen_shake_timer / 0.30f;
+        int jitter = (int)((g_frame_counter * 1103515245u + 12345u) >> 28) & 7;
+        center_y += ((float)jitter - 3.5f) * shake * 1.6f;
+    }
 
     float ray_x = dir_x - plane_x;
     float ray_y = dir_y - plane_y;
@@ -1228,8 +1244,11 @@ static void render_raycast_eye(const Level *lv, gfx3dSide_t side, float eye_offs
             const Projectile *pr = &g_projectiles[pi];
             if (!pr->active) continue;
             if (!entity_in_front_and_near(pos_x, pos_y, dir_x, dir_y, pr->x, pr->y, ENEMY_RENDER_DIST2)) continue;
+            const uint8_t *psp = (pr->style == 1) ? ORB_SPRITE_8X8 : ((pr->style == 2) ? WAVE_SPRITE_8X8 : ARROW_SPRITE_8X8);
+            float psz = 0.25f;
+            if (pr->anim) psz += 0.035f * sinf((float)g_frame_counter * 0.22f + (float)pi);
             draw_billboard_masked_sprite_centered_z(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, zbuf,
-                                         pr->x, pr->y, pr->z, 0.25f, ARROW_SPRITE_8X8, (Color){255, 195, 75});
+                                         pr->x, pr->y, pr->z, psz, psp, npc_color_for(pr->color_id));
         }
         if (g_has_success) {
             draw_success_floor_marker(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y,
@@ -1316,8 +1335,12 @@ static void render_raycast_eye(const Level *lv, gfx3dSide_t side, float eye_offs
         draw_text3x5(fb, TOP_W, TOP_H, 8, 8, g_edit_mode ? "EDITOR" : (g_random_play ? "RANDOM" : "PLAY"), g_edit_mode ? (Color){120,240,120} : (Color){120,190,255}, 2);
         draw_text_number(fb, TOP_W, TOP_H, 82, 8, g_dirty ? "SLOT* " : "SLOT ", g_slot, (Color){240, 240, 240}, 2);
         int status_x = 246;
-        if (g_edit_mode) draw_text_number(fb, TOP_W, TOP_H, 160, 8, "TILE ", g_selected_tile, map_tile_color(g_selected_tile), 2);
-        else {
+        if (g_edit_mode) {
+            draw_text_number(fb, TOP_W, TOP_H, 160, 8, "TILE ", g_selected_tile, map_tile_color(g_selected_tile), 2);
+            draw_text3x5(fb, TOP_W, TOP_H, 230, 8, editor_tool_name(g_editor_tool), (Color){190,220,255}, 1);
+            draw_text3x5(fb, TOP_W, TOP_H, 286, 8, room_class_short_name(g_selected_room), room_class_color(g_selected_room), 1);
+            status_x = 332;
+        } else {
             draw_text_number(fb, TOP_W, TOP_H, 160, 8, "KEY ", g_player_keys, (Color){245, 205, 55}, 2);
             draw_text_number(fb, TOP_W, TOP_H, 218, 8, "SCR ", g_player_score, (Color){230, 230, 160}, 2);
             draw_text3x5(fb, TOP_W, TOP_H, 292, 8, weapon_name(g_current_weapon), (Color){190, 220, 255}, 1);
@@ -1414,6 +1437,21 @@ void draw_tile_palette(u8 *fb) {
         fill_rect_raw(fb, BOT_W, BOT_H, x0 - 1, y0 - 1, x0 + 20, y0 + 11, border);
         fill_rect_raw(fb, BOT_W, BOT_H, x0, y0, x0 + 19, y0 + 10, map_tile_color((uint8_t)t));
         draw_tile_label(fb, x0 + 7, y0 + 3, t, (t == 0) ? (Color){230,230,230} : (Color){8,8,8});
+    }
+}
+
+
+static const char *room_class_short_name(uint8_t room) {
+    switch (room) {
+        case ROOM_TREASURE: return "TRSR";
+        case ROOM_BOSS: return "BOSS";
+        case ROOM_TRAP: return "TRAP";
+        case ROOM_ENEMY: return "ENMY";
+        case ROOM_CORRIDOR: return "HALL";
+        case ROOM_SAFE: return "SAFE";
+        case ROOM_PUZZLE: return "PUZL";
+        case ROOM_SECRET: return "SECR";
+        default: return "NONE";
     }
 }
 
@@ -1564,7 +1602,18 @@ void render_bottom_map(void) {
             int ty = vy + y;
             uint8_t tile = tile_at(lv, tx, ty);
             Color c = map_tile_color(tile);
+            uint8_t room = room_at(lv, tx, ty);
+            if (g_edit_mode && room != ROOM_NONE) {
+                Color rc = room_class_color(room);
+                c.r = (uint8_t)(((int)c.r + (int)rc.r) / 2);
+                c.g = (uint8_t)(((int)c.g + (int)rc.g) / 2);
+                c.b = (uint8_t)(((int)c.b + (int)rc.b) / 2);
+            }
             fill_rect_raw(fb, BOT_W, BOT_H, ox + x * cell, oy + y * cell, ox + (x + 1) * cell, oy + (y + 1) * cell, c);
+            if (g_edit_mode && room != ROOM_NONE && cell >= 6) {
+                Color rc = room_class_color(room);
+                fill_rect_raw(fb, BOT_W, BOT_H, ox + x * cell + 1, oy + y * cell + 1, ox + (x + 1) * cell - 1, oy + y * cell + 2, rc);
+            }
 
             if (cell >= 10) {
                 fill_rect_raw(fb, BOT_W, BOT_H, ox + x * cell, oy + y * cell, ox + (x + 1) * cell, oy + y * cell + 1, (Color){8,8,8});
@@ -1618,6 +1667,8 @@ void render_bottom_map(void) {
         draw_editor_button(fb, 108, 188, 144, 206, "-", true);
         draw_editor_button(fb, 148, 188, 184, 206, "+", true);
         draw_editor_button(fb, 108, 210, 184, 232, "FIT", true);
+        draw_editor_button(fb, 188, 188, 216, 206, editor_tool_name(g_editor_tool), true);
+        draw_editor_button(fb, 188, 210, 216, 232, room_class_short_name(g_selected_room), g_editor_tool == EDITOR_TOOL_ROOM);
         draw_text3x5(fb, BOT_W, BOT_H, 224, 184, "PAN", (Color){180, 210, 255}, 1);
         draw_editor_button(fb, 218, 214, 248, 236, "L", can_pan);
         draw_editor_button(fb, 252, 188, 286, 210, "U", can_pan);
@@ -1660,7 +1711,9 @@ static const char *entity_quest_name(int q) {
 }
 
 static void draw_entity_edit_row(u8 *fb, int row, const char *label, const char *value) {
-    int y = 42 + row * 15;
+    int visible = (g_entity_edit_mode == EDIT_MODE_WEAPON) ? 8 : 12;
+    if (row < g_entity_edit_scroll || row >= g_entity_edit_scroll + visible) return;
+    int y = 42 + (row - g_entity_edit_scroll) * 15;
     Color bg = (g_entity_edit_cursor == row) ? (Color){48, 66, 102} : (Color){16, 18, 28};
     Color fg = (g_entity_edit_cursor == row) ? (Color){255, 230, 150} : (Color){230, 230, 230};
     fill_rect_raw(fb, BOT_W, BOT_H, 10, y - 2, BOT_W - 10, y + 12, bg);
@@ -1843,7 +1896,7 @@ void render_entity_editor(u8 *fb) {
     draw_text3x5(fb, BOT_W, BOT_H, 8, 7,
                  g_entity_edit_mode == EDIT_MODE_NPC ? "NPC EDITOR" : (g_entity_edit_mode == EDIT_MODE_ENEMY ? "ENEMY EDITOR" : "WEAPON EDITOR"),
                  (Color){255, 235, 170}, 2);
-    draw_text3x5(fb, BOT_W, BOT_H, 8, 226, "DUP/DDOWN ROW  DLEFT/DRIGHT VALUE  L/R FAST  A EDIT  B BACK", (Color){190, 200, 220}, 1);
+    draw_text3x5(fb, BOT_W, BOT_H, 8, 226, "DUP/DDOWN SCROLL  D<> VALUE  L/R FAST  A EDIT  B BACK", (Color){190, 200, 220}, 1);
 
     char buf[64];
     if (g_entity_edit_mode == EDIT_MODE_NPC) {
@@ -1881,14 +1934,21 @@ void render_entity_editor(u8 *fb) {
         draw_entity_edit_row(fb, 5, "TEXT SPEED", text_speed_name(m->text_speed));
         snprintf(buf, sizeof(buf), "%d", m->color_id & 7); draw_entity_edit_row(fb, 6, "COLOR", buf);
         draw_entity_edit_row(fb, 7, "AI RANK", render_ai_rank_name(m->ai_rank));
-        draw_entity_edit_row(fb, 8, "RANGED", m->ranged_attack ? "YES" : "NO");
-        snprintf(buf, sizeof(buf), "%d", m->spawn_limit); draw_entity_edit_row(fb, 9, "SPAWN MAX", buf);
-        draw_entity_edit_row(fb, 10, "SPAWN TYPE", render_ai_spawn_name(m->spawn_kind));
-        snprintf(buf, sizeof(buf), "%d", m->command_range ? m->command_range : 10); draw_entity_edit_row(fb, 11, "COMMAND RNG", buf);
-        draw_entity_edit_row(fb, 12, "ENEMY 16X16", "A OPEN");
-        draw_entity_edit_row(fb, 13, "BOSS 32X32", "A OPEN");
-        snprintf(buf, sizeof(buf), "%d", g_player_health_max); draw_entity_edit_row(fb, 14, "PLAYER HP", buf);
-        draw_entity_edit_row(fb, 15, "DONE", "A CLOSE");
+        draw_entity_edit_row(fb, 8, "PROJECTILE", m->ranged_attack ? "YES" : "NO");
+        snprintf(buf, sizeof(buf), "%.1f", (float)(m->melee_range ? m->melee_range : 7) * 0.10f); draw_entity_edit_row(fb, 9, "ATK RANGE", buf);
+        snprintf(buf, sizeof(buf), "%.1fS", (float)(m->attack_cooldown ? m->attack_cooldown : 7) * 0.10f); draw_entity_edit_row(fb, 10, "ATK COOLDN", buf);
+        snprintf(buf, sizeof(buf), "%d", m->spawn_limit); draw_entity_edit_row(fb, 11, "SPAWN MAX", buf);
+        draw_entity_edit_row(fb, 12, "SPAWN TYPE", render_ai_spawn_name(m->spawn_kind));
+        snprintf(buf, sizeof(buf), "%.1fS", (float)(m->spawn_cooldown ? m->spawn_cooldown : 25) * 0.10f); draw_entity_edit_row(fb, 13, "SPAWN CD", buf);
+        snprintf(buf, sizeof(buf), "%d", m->sight_range ? m->sight_range : (m->ai_rank == AI_RANK_BOSS ? 20 : (m->ai_rank == AI_RANK_CAPTAIN ? 16 : 13))); draw_entity_edit_row(fb, 14, "SIGHT RNG", buf);
+        snprintf(buf, sizeof(buf), "%d", m->command_range ? m->command_range : 10); draw_entity_edit_row(fb, 15, "COMMAND RNG", buf);
+        snprintf(buf, sizeof(buf), "%d", m->projectile_color & 7); draw_entity_edit_row(fb, 16, "PROJ COLOR", buf);
+        snprintf(buf, sizeof(buf), "%d", m->projectile_style % 3); draw_entity_edit_row(fb, 17, "PROJ STYLE", buf);
+        draw_entity_edit_row(fb, 18, "PROJ ANIM", m->projectile_anim ? "YES" : "NO");
+        draw_entity_edit_row(fb, 19, "ENEMY 16X16", "A OPEN");
+        draw_entity_edit_row(fb, 20, "BOSS 32X32", "A OPEN");
+        snprintf(buf, sizeof(buf), "%d", g_player_health_max); draw_entity_edit_row(fb, 21, "PLAYER HP", buf);
+        draw_entity_edit_row(fb, 22, "DONE", "A CLOSE");
         if (m->ai_rank == AI_RANK_BOSS) draw_boss_sprite_preview_grid(fb, 246, 34, m->boss_sprite, npc_color_for(m->color_id), 2, -1, -1);
         else draw_enemy16_sprite_preview_grid(fb, 258, 34, m->sprite16, npc_color_for(m->color_id), 3, -1, -1);
     } else if (g_entity_edit_mode == EDIT_MODE_WEAPON) {
@@ -1922,7 +1982,9 @@ const char *menu_action_name(int action) {
 }
 
 static void draw_settings_row(u8 *fb, int row, const char *label, const char *value) {
-    int y = 171 + row * 6;
+    const int visible = 10;
+    if (row < g_settings_scroll || row >= g_settings_scroll + visible) return;
+    int y = 171 + (row - g_settings_scroll) * 6;
     Color bg = (g_settings_cursor == row) ? (Color){50, 66, 96} : (Color){12, 14, 24};
     Color fg = (g_settings_cursor == row) ? (Color){255, 230, 150} : (Color){225, 225, 225};
     fill_rect_raw(fb, BOT_W, BOT_H, 8, y - 1, BOT_W - 8, y + 6, bg);
@@ -1998,12 +2060,14 @@ void render_world_menu(void) {
         draw_settings_row(fb, 7, "ANTI ALIAS", g_antialiasing ? "ON" : "OFF");
         draw_settings_row(fb, 8, "FAST RENDER", g_fast_render ? "ON" : "OFF");
         draw_settings_row(fb, 9, "DEBUG", g_debug_overlay ? "ON" : "OFF");
+        draw_settings_row(fb, 10, "SCREEN SHAKE", g_screen_shake_enabled ? "ON" : "OFF");
         char npcbuf[16];
         snprintf(npcbuf, sizeof(npcbuf), "%d", g_default_npc_color & 7);
-        draw_settings_row(fb, 10, "DEFAULT NPC", npcbuf);
+        draw_settings_row(fb, 11, "DEFAULT NPC", npcbuf);
+        draw_settings_row(fb, 12, "DEFAULT ART", "EDIT ON NPC");
         char hpbuf[16];
         snprintf(hpbuf, sizeof(hpbuf), "%d", g_player_health_max);
-        draw_settings_row(fb, 11, "PLAYER HP", hpbuf);
+        draw_settings_row(fb, 13, "PLAYER HP", hpbuf);
     } else if (g_resize_menu) {
         draw_text3x5(fb, BOT_W, BOT_H, 8, 188, "RESIZE / NEW LEVEL", (Color){255,220,140}, 1);
         draw_text_number(fb, BOT_W, BOT_H, 8, 202, "WIDTH ", g_resize_w, (Color){230,230,230}, 2);
