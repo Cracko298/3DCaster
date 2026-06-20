@@ -97,6 +97,54 @@ void set_tile(Level *lv, int x, int y, uint8_t v) {
     lv->tiles[tile_index(lv, x, y)] = v & MAX_TILE_ID;
 }
 
+uint8_t room_at(const Level *lv, int x, int y) {
+    if (!lv || x < 0 || y < 0 || x >= lv->width || y >= lv->height) return ROOM_NONE;
+    int idx = tile_index(lv, x, y);
+    if (idx < 0 || idx >= MAX_TILES) return ROOM_NONE;
+    return g_room_tiles[idx] <= MAX_ROOM_ID ? g_room_tiles[idx] : ROOM_NONE;
+}
+
+void set_room(Level *lv, int x, int y, uint8_t v) {
+    if (!lv || x < 0 || y < 0 || x >= lv->width || y >= lv->height) return;
+    int idx = tile_index(lv, x, y);
+    if (idx < 0 || idx >= MAX_TILES) return;
+    g_room_tiles[idx] = (v <= MAX_ROOM_ID) ? v : ROOM_NONE;
+}
+
+void clear_room_overlay(void) {
+    memset(g_room_tiles, 0, sizeof(g_room_tiles));
+}
+
+const char *room_class_name(uint8_t room) {
+    switch (room) {
+        case ROOM_TREASURE: return "TREASURE";
+        case ROOM_BOSS: return "BOSS";
+        case ROOM_TRAP: return "TRAP";
+        case ROOM_ENEMY: return "ENEMY";
+        case ROOM_CORRIDOR: return "CORRIDOR";
+        case ROOM_SAFE: return "SAFE";
+        case ROOM_PUZZLE: return "PUZZLE";
+        case ROOM_SECRET: return "SECRET";
+        case ROOM_NONE:
+        default: return "NONE";
+    }
+}
+
+Color room_class_color(uint8_t room) {
+    switch (room) {
+        case ROOM_TREASURE: return (Color){235, 185, 60};
+        case ROOM_BOSS: return (Color){230, 60, 70};
+        case ROOM_TRAP: return (Color){230, 110, 45};
+        case ROOM_ENEMY: return (Color){175, 75, 230};
+        case ROOM_CORRIDOR: return (Color){95, 110, 125};
+        case ROOM_SAFE: return (Color){75, 220, 135};
+        case ROOM_PUZZLE: return (Color){90, 155, 235};
+        case ROOM_SECRET: return (Color){220, 95, 205};
+        case ROOM_NONE:
+        default: return (Color){0, 0, 0};
+    }
+}
+
 bool tile_blocks_side(uint8_t tile, float z) {
     if (tile >= 1 && tile <= 6) return true;
     if (tile == PLATFORM_TILE) return z < (PLATFORM_TOP - STEP_HEIGHT);
@@ -191,6 +239,7 @@ void make_border(Level *lv) {
 
 void new_sized_level(Level *lv, uint16_t width, uint16_t height) {
     memset(lv, 0, sizeof(*lv));
+    if (lv == &g_level) clear_room_overlay();
     lv->width = (uint16_t)clampi32(round_size_step(width), MIN_MAP_W, MAX_MAP_W);
     lv->height = (uint16_t)clampi32(round_size_step(height), MIN_MAP_H, MAX_MAP_H);
     lv->player_x = clampf32(5.5f, 1.1f, (float)lv->width - 1.1f);
@@ -241,6 +290,13 @@ void new_open_level(Level *lv) {
 void resize_level_preserve(Level *lv, uint16_t width, uint16_t height) {
     if (!lv) return;
 
+    bool preserve_rooms = (lv == &g_level);
+    uint8_t old_rooms[MAX_TILES];
+    if (preserve_rooms) {
+        memcpy(old_rooms, g_room_tiles, sizeof(old_rooms));
+        memset(g_room_tiles, 0, sizeof(g_room_tiles));
+    }
+
     Level *tmp = &g_resize_temp;
     memset(tmp, 0, sizeof(*tmp));
     tmp->width = (uint16_t)round_size_step(width);
@@ -252,6 +308,7 @@ void resize_level_preserve(Level *lv, uint16_t width, uint16_t height) {
     for (int y = 0; y < copy_h; y++) {
         for (int x = 0; x < copy_w; x++) {
             tmp->tiles[y * tmp->width + x] = lv->tiles[y * lv->width + x] & 0x0F;
+            if (preserve_rooms) g_room_tiles[y * tmp->width + x] = old_rooms[y * lv->width + x] <= MAX_ROOM_ID ? old_rooms[y * lv->width + x] : ROOM_NONE;
         }
     }
 
