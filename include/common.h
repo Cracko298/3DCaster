@@ -44,7 +44,7 @@
 #define FOV_DEGREES 66.0f
 #define FOV_MIN_DEGREES 50.0f
 #define FOV_MAX_DEGREES 110.0f
-#define SETTINGS_ROW_COUNT 12
+#define SETTINGS_ROW_COUNT 14
 #define MOVE_SPEED 3.3f
 #define SPRINT_MULT 1.75f
 #define ROT_SPEED 2.35f
@@ -66,6 +66,19 @@
 #define TILE_KEY 14
 #define TILE_DOOR 15
 #define MAX_TILE_ID 15
+#define MAX_ROOM_ID 8
+#define ROOM_NONE 0
+#define ROOM_TREASURE 1
+#define ROOM_BOSS 2
+#define ROOM_TRAP 3
+#define ROOM_ENEMY 4
+#define ROOM_CORRIDOR 5
+#define ROOM_SAFE 6
+#define ROOM_PUZZLE 7
+#define ROOM_SECRET 8
+#define EDITOR_TOOL_PAINT 0
+#define EDITOR_TOOL_SELECT 1
+#define EDITOR_TOOL_ROOM 2
 #define MAX_ENEMIES 32
 #define MAX_COLLECTIBLES 160
 #define MAX_DOORS 128
@@ -205,7 +218,14 @@ typedef struct {
     uint8_t spawn_kind;
     uint8_t spawn_limit;
     uint8_t command_range;
+    uint8_t sight_range;
     uint8_t ranged_attack;
+    uint8_t melee_range;
+    uint8_t attack_cooldown;
+    uint8_t spawn_cooldown;
+    uint8_t projectile_color;
+    uint8_t projectile_style;
+    uint8_t projectile_anim;
     uint8_t speed_attr;
     uint8_t size_pct;
     uint8_t text_speed;
@@ -237,6 +257,9 @@ typedef struct {
     float vx, vy;
     float life;
     int damage;
+    uint8_t color_id;
+    uint8_t style;
+    uint8_t anim;
     char killer[24];
 } Projectile;
 
@@ -271,7 +294,14 @@ typedef struct {
     uint8_t spawn_kind;
     uint8_t spawn_limit;
     uint8_t command_range;
+    uint8_t sight_range;
     uint8_t ranged_attack;
+    uint8_t melee_range;
+    uint8_t attack_cooldown;
+    uint8_t spawn_cooldown;
+    uint8_t projectile_color;
+    uint8_t projectile_style;
+    uint8_t projectile_anim;
     uint8_t speed_attr;
     uint8_t size_pct;
     uint8_t text_speed;
@@ -322,6 +352,7 @@ extern Door g_doors[MAX_DOORS];
 extern Projectile g_projectiles[MAX_PROJECTILES];
 extern NPC g_npcs[MAX_NPCS];
 extern EnemyMeta g_enemy_metas[MAX_ENEMIES];
+extern uint8_t g_room_tiles[MAX_TILES];
 extern WeaponDef g_weapons[MAX_WEAPONS];
 extern SlotInfo g_slots[SLOT_COUNT];
 extern bool g_in_menu;
@@ -333,6 +364,8 @@ extern bool g_preview_valid;
 extern bool g_render_angle_override;
 extern bool g_render_world_hud;
 extern uint8_t g_selected_tile;
+extern uint8_t g_selected_room;
+extern int g_editor_tool;
 extern int g_slot;
 extern int g_menu_action;
 extern int g_dup_source;
@@ -349,6 +382,7 @@ extern bool g_is_new3ds;
 extern float g_camera_pitch;
 extern bool g_settings_menu;
 extern int g_settings_cursor;
+extern int g_settings_scroll;
 extern float g_fov_degrees;
 extern float g_level_depth;
 extern bool g_view_bob;
@@ -390,7 +424,10 @@ extern char g_death_killer[32];
 extern int g_current_weapon;
 extern float g_attack_cooldown;
 extern float g_slash_timer;
+extern float g_slash_total;
 extern float g_weapon_bounce_timer;
+extern bool g_screen_shake_enabled;
+extern float g_screen_shake_timer;
 extern int g_slash_type;
 extern bool g_has_success;
 extern float g_success_x;
@@ -409,6 +446,7 @@ extern bool g_loaded_npc_metadata;
 extern bool g_loaded_enemy_metadata;
 extern int g_entity_edit_mode;
 extern int g_entity_edit_cursor;
+extern int g_entity_edit_scroll;
 extern int g_entity_edit_x;
 extern int g_entity_edit_y;
 extern int g_entity_edit_weapon;
@@ -439,6 +477,11 @@ bool write_u16_le(FILE *f, uint16_t v);
 int tile_index(const Level *lv, int x, int y);
 uint8_t tile_at(const Level *lv, int x, int y);
 void set_tile(Level *lv, int x, int y, uint8_t v);
+uint8_t room_at(const Level *lv, int x, int y);
+void set_room(Level *lv, int x, int y, uint8_t v);
+void clear_room_overlay(void);
+const char *room_class_name(uint8_t room);
+Color room_class_color(uint8_t room);
 bool tile_blocks_side(uint8_t tile, float z);
 bool tile_blocks_raycast(uint8_t tile);
 float door_open_fraction_at(int x, int y);
@@ -522,6 +565,7 @@ EnemyMeta *enemy_meta_find_at(int x, int y);
 EnemyMeta *enemy_meta_ensure_at(int x, int y);
 void randomize_weapon_stats(uint32_t seed);
 const char *weapon_name(int weapon);
+const char *editor_tool_name(int tool);
 void copy_default_sprite(uint8_t *dst, int kind);
 void copy_default_enemy_sprite16(uint16_t *dst);
 void copy_default_boss_sprite(uint32_t *dst);
