@@ -115,6 +115,202 @@ void clear_room_overlay(void) {
     memset(g_room_tiles, 0, sizeof(g_room_tiles));
 }
 
+void clear_texture_overlays(void) {
+    memset(g_wall_textures, 0, sizeof(g_wall_textures));
+    memset(g_floor_textures, 0, sizeof(g_floor_textures));
+}
+
+void clear_extended_entity_metadata(void) {
+    memset(g_door_metas, 0, sizeof(g_door_metas));
+    memset(g_npc_anims, 0, sizeof(g_npc_anims));
+    memset(g_enemy_anims, 0, sizeof(g_enemy_anims));
+    g_door_meta_count = 0;
+    g_npc_anim_count = 0;
+    g_enemy_anim_count = 0;
+}
+
+uint8_t wall_texture_at(const Level *lv, int x, int y) {
+    int i = tile_index(lv, x, y);
+    if (i < 0 || i >= MAX_TILES) return 0;
+    return g_wall_textures[i] & MAX_TEXTURE_ID;
+}
+
+uint8_t floor_texture_at(const Level *lv, int x, int y) {
+    int i = tile_index(lv, x, y);
+    if (i < 0 || i >= MAX_TILES) return 0;
+    return g_floor_textures[i] & MAX_TEXTURE_ID;
+}
+
+void set_wall_texture(Level *lv, int x, int y, uint8_t v) {
+    int i = tile_index(lv, x, y);
+    if (i < 0 || i >= MAX_TILES) return;
+    g_wall_textures[i] = v & MAX_TEXTURE_ID;
+}
+
+void set_floor_texture(Level *lv, int x, int y, uint8_t v) {
+    int i = tile_index(lv, x, y);
+    if (i < 0 || i >= MAX_TILES) return;
+    g_floor_textures[i] = v & MAX_TEXTURE_ID;
+}
+
+DoorMeta *door_meta_find_at(int x, int y) {
+    for (int i = 0; i < g_door_meta_count; i++) if (g_door_metas[i].active && g_door_metas[i].x == x && g_door_metas[i].y == y) return &g_door_metas[i];
+    return NULL;
+}
+
+DoorMeta *door_meta_ensure_at(int x, int y) {
+    DoorMeta *m = door_meta_find_at(x, y);
+    if (m) return m;
+    if (g_door_meta_count >= MAX_DOORS) return NULL;
+    m = &g_door_metas[g_door_meta_count++];
+    memset(m, 0, sizeof(*m));
+    m->active = true;
+    m->x = x;
+    m->y = y;
+    m->texture_id = 0;
+    m->group_id = 0;
+    m->door_type = DOOR_TYPE_AUTO;
+    m->speed = DOOR_SPEED_MEDIUM;
+    m->move_dir = DOOR_MOVE_UP;
+    return m;
+}
+
+uint8_t door_texture_at(int x, int y) {
+    DoorMeta *m = door_meta_find_at(x, y);
+    if (m) return m->texture_id & MAX_TEXTURE_ID;
+    for (int i = 0; i < g_door_count; i++) if (g_doors[i].active && g_doors[i].x == x && g_doors[i].y == y) return g_doors[i].texture_id & MAX_TEXTURE_ID;
+    return 0;
+}
+
+NPCAnim *npc_anim_find_at(int x, int y) {
+    for (int i = 0; i < g_npc_anim_count; i++) if (g_npc_anims[i].active && g_npc_anims[i].x == x && g_npc_anims[i].y == y) return &g_npc_anims[i];
+    return NULL;
+}
+
+NPCAnim *npc_anim_ensure_at(int x, int y) {
+    NPCAnim *a = npc_anim_find_at(x, y);
+    if (a) return a;
+    if (g_npc_anim_count >= MAX_NPCS) return NULL;
+    a = &g_npc_anims[g_npc_anim_count++];
+    memset(a, 0, sizeof(*a));
+    a->active = true;
+    a->x = x;
+    a->y = y;
+    a->enabled = false;
+    a->speed = ANIM_SPEED_OFF;
+    return a;
+}
+
+EnemyAnim *enemy_anim_find_at(int x, int y) {
+    for (int i = 0; i < g_enemy_anim_count; i++) if (g_enemy_anims[i].active && g_enemy_anims[i].x == x && g_enemy_anims[i].y == y) return &g_enemy_anims[i];
+    return NULL;
+}
+
+EnemyAnim *enemy_anim_ensure_at(int x, int y) {
+    EnemyAnim *a = enemy_anim_find_at(x, y);
+    if (a) return a;
+    if (g_enemy_anim_count >= MAX_ENEMIES) return NULL;
+    a = &g_enemy_anims[g_enemy_anim_count++];
+    memset(a, 0, sizeof(*a));
+    a->active = true;
+    a->x = x;
+    a->y = y;
+    a->enabled = false;
+    a->speed = ANIM_SPEED_OFF;
+    return a;
+}
+
+const char *door_type_name(uint8_t t) {
+    if (t == DOOR_TYPE_KEY) return "KEY";
+    if (t == DOOR_TYPE_TOGGLE) return "TOGGLE";
+    if (t == DOOR_TYPE_SWITCH) return "SWITCH";
+    return "AUTO";
+}
+
+const char *door_speed_name(uint8_t s) {
+    if (s == DOOR_SPEED_SLOW) return "SLOW";
+    if (s == DOOR_SPEED_FAST) return "FAST";
+    return "MEDIUM";
+}
+
+const char *door_move_name(uint8_t d) {
+    if (d == DOOR_MOVE_DOWN) return "DOWN";
+    if (d == DOOR_MOVE_LEFT) return "LEFT";
+    if (d == DOOR_MOVE_RIGHT) return "RIGHT";
+    return "UP";
+}
+
+const char *anim_speed_name(uint8_t s) {
+    if (s == ANIM_SPEED_SLOW) return "SLOW";
+    if (s == ANIM_SPEED_MEDIUM) return "MEDIUM";
+    if (s == ANIM_SPEED_FAST) return "FAST";
+    return "OFF";
+}
+
+float door_speed_seconds(uint8_t s) {
+    if (s == DOOR_SPEED_SLOW) return 1.35f;
+    if (s == DOOR_SPEED_FAST) return 0.34f;
+    return 0.72f;
+}
+
+static int anim_step_mod(uint8_t s) {
+    if (s == ANIM_SPEED_SLOW) return 28;
+    if (s == ANIM_SPEED_MEDIUM) return 14;
+    if (s == ANIM_SPEED_FAST) return 7;
+    return 0;
+}
+
+static bool frame_empty16(const uint16_t *f) {
+    if (!f) return true;
+    for (int i = 0; i < ENEMY_SPRITE_ROWS; i++) if (f[i]) return false;
+    return true;
+}
+
+const uint16_t *npc_anim_frame_for(const NPC *n) {
+    if (!n) return NULL;
+    NPCAnim *a = npc_anim_find_at(n->x, n->y);
+    if (!a || !a->enabled || a->speed == ANIM_SPEED_OFF) return NULL;
+    bool talking = n->talk_timer > 0.0f;
+    if (!talking) {
+        float nx = (float)n->x + 0.5f;
+        float ny = (float)n->y + 0.5f;
+        float dx = g_level.player_x - nx;
+        float dy = g_level.player_y - ny;
+        float radius = (n->text_mode == TEXT_MODE_ALWAYS) ? 16.0f : 10.0f;
+        talking = (dx * dx + dy * dy) <= radius * radius;
+    }
+    int state = g_edit_mode ? (n->completed ? NPC_ANIM_COMPLETE : NPC_ANIM_IDLE) : (n->completed ? NPC_ANIM_COMPLETE : (talking ? NPC_ANIM_TALK : NPC_ANIM_IDLE));
+    int mod = anim_step_mod(a->speed);
+    int frame = (g_edit_mode || mod == 0) ? 0 : (int)((g_frame_counter / (uint32_t)mod) % ANIM_FRAMES);
+    if (frame_empty16(a->frames[state][frame])) return NULL;
+    return a->frames[state][frame];
+}
+
+const uint16_t *enemy_anim_frame_for(const Enemy *e) {
+    if (!e) return NULL;
+    EnemyAnim *a = enemy_anim_find_at((int)floorf(e->start_x), (int)floorf(e->start_y));
+    if (!a || !a->enabled || a->speed == ANIM_SPEED_OFF) return NULL;
+    int state = ENEMY_ANIM_IDLE;
+    if (!g_edit_mode) {
+        if (e->ranged_attack && e->ranged_timer > 0.1f) state = ENEMY_ANIM_SHOOT;
+        else if (e->ranged_timer > 0.1f || e->hit_timer > 0.0f) state = ENEMY_ANIM_ATTACK;
+        else if (e->state) state = ENEMY_ANIM_MOVE;
+    }
+    int mod = anim_step_mod(a->speed);
+    int frame = (g_edit_mode || mod == 0) ? 0 : (int)((g_frame_counter / (uint32_t)mod) % ANIM_FRAMES);
+    if (frame_empty16(a->frames[state][frame])) return NULL;
+    return a->frames[state][frame];
+}
+
+bool door_blocks_at(int x, int y) {
+    for (int i = 0; i < g_door_count; i++) {
+        Door *d = &g_doors[i];
+        if (!d->active || d->x != x || d->y != y) continue;
+        return d->open_t < 0.92f;
+    }
+    return true;
+}
+
 const char *room_class_name(uint8_t room) {
     switch (room) {
         case ROOM_TREASURE: return "TREASURE";
@@ -177,7 +373,9 @@ bool can_stand_at(const Level *lv, float x, float y, float z) {
         int ix = (int)px[i];
         int iy = (int)py[i];
         if (ix < 0 || iy < 0 || ix >= lv->width || iy >= lv->height) return false;
-        if (tile_blocks_side(lv->tiles[tile_index(lv, ix, iy)], z)) return false;
+        uint8_t tt = lv->tiles[tile_index(lv, ix, iy)] & MAX_TILE_ID;
+        if (tt == TILE_DOOR) { if (door_blocks_at(ix, iy)) return false; }
+        else if (tile_blocks_side(tt, z)) return false;
     }
     return true;
 }
@@ -239,7 +437,7 @@ void make_border(Level *lv) {
 
 void new_sized_level(Level *lv, uint16_t width, uint16_t height) {
     memset(lv, 0, sizeof(*lv));
-    if (lv == &g_level) clear_room_overlay();
+    if (lv == &g_level) { clear_room_overlay(); clear_texture_overlays(); clear_extended_entity_metadata(); }
     lv->width = (uint16_t)clampi32(round_size_step(width), MIN_MAP_W, MAX_MAP_W);
     lv->height = (uint16_t)clampi32(round_size_step(height), MIN_MAP_H, MAX_MAP_H);
     lv->player_x = clampf32(5.5f, 1.1f, (float)lv->width - 1.1f);
