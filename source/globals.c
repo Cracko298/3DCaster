@@ -22,6 +22,11 @@ Projectile g_projectiles[MAX_PROJECTILES];
 NPC g_npcs[MAX_NPCS];
 EnemyMeta g_enemy_metas[MAX_ENEMIES];
 uint8_t g_room_tiles[MAX_TILES];
+uint8_t g_wall_textures[MAX_TILES];
+uint8_t g_floor_textures[MAX_TILES];
+DoorMeta g_door_metas[MAX_DOORS];
+NPCAnim g_npc_anims[MAX_NPCS];
+EnemyAnim g_enemy_anims[MAX_ENEMIES];
 WeaponDef g_weapons[MAX_WEAPONS] = {
     {"SWORD", 3, 1, 20, 1, {0x10,0x18,0x18,0x10,0x10,0x54,0x38,0x10}},
     {"DAGGER", 2, 1, 11, 2, {0x00,0x08,0x18,0x18,0x10,0x10,0x38,0x10}},
@@ -85,6 +90,11 @@ int g_door_count = 0;
 int g_projectile_count = 0;
 int g_npc_count = 0;
 int g_enemy_meta_count = 0;
+int g_door_meta_count = 0;
+int g_npc_anim_count = 0;
+int g_enemy_anim_count = 0;
+int g_anim_edit_state = 0;
+int g_anim_edit_frame = 0;
 int g_player_keys = 0;
 int g_player_score = 0;
 int g_coins_bank = 0;
