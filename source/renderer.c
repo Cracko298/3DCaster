@@ -1,10 +1,11 @@
 #include "common.h"
 
+static Color floor_texture_color(void);
 static const char *room_class_short_name(uint8_t room);
 
 void draw_sky_floor(u8 *fb) {
     fill_rect_raw(fb, TOP_W, TOP_H, 0, 0, TOP_W, TOP_H / 2, (Color){60, 92, 145});
-    fill_rect_raw(fb, TOP_W, TOP_H, 0, TOP_H / 2, TOP_W, TOP_H, (Color){45, 42, 38});
+    fill_rect_raw(fb, TOP_W, TOP_H, 0, TOP_H / 2, TOP_W, TOP_H, floor_texture_color());
 }
 
 static Color blend_color(Color a, Color b, float t) {
@@ -16,6 +17,34 @@ static Color blend_color(Color a, Color b, float t) {
     out.b = (uint8_t)(a.b * inv + b.b * t + 0.5f);
     return out;
 }
+
+static Color texture_tint_color(uint8_t tex, Color base) {
+    tex &= MAX_TEXTURE_ID;
+    switch (tex) {
+        case 1: return blend_color(base, (Color){255,255,255}, 0.18f);
+        case 2: return blend_color(base, (Color){255,95,75}, 0.22f);
+        case 3: return blend_color(base, (Color){85,175,255}, 0.22f);
+        case 4: return blend_color(base, (Color){80,225,105}, 0.20f);
+        case 5: return blend_color(base, (Color){255,225,90}, 0.24f);
+        case 6: return blend_color(base, (Color){185,95,255}, 0.23f);
+        case 7: return blend_color(base, (Color){95,235,235}, 0.22f);
+        default: return base;
+    }
+}
+
+static Color wall_texture_color(uint8_t tile, int x, int y) {
+    Color base = WALL_COLORS[tile & 7];
+    return texture_tint_color(wall_texture_at(&g_level, x, y), base);
+}
+
+static Color door_texture_color(int x, int y) {
+    return texture_tint_color(door_texture_at(x, y), (Color){150, 100, 45});
+}
+
+static Color floor_texture_color(void) {
+    return texture_tint_color(g_floor_textures[0] & MAX_TEXTURE_ID, (Color){45, 42, 38});
+}
+
 
 static Color apply_dof_fade(Color c, float distance) {
     if (!g_dof_enabled) return c;
@@ -652,6 +681,7 @@ static void draw_enemy_sprite_with_hp(u8 *fb,
     float death_t = e->dying ? clampf32(1.0f - (e->death_timer / 0.48f), 0.0f, 1.0f) : 0.0f;
     if (hit_t > 0.0f) screen_x += (int)(sinf(hit_t * 32.0f) * 4.0f);
     bool boss_sprite = (e->ai_rank == AI_RANK_BOSS);
+    const uint16_t *anim16 = boss_sprite ? NULL : enemy_anim_frame_for(e);
     int mask_w = boss_sprite ? BOSS_SPRITE_W : ENEMY_SPRITE_W;
     int mask_h = boss_sprite ? BOSS_SPRITE_H : ENEMY_SPRITE_H;
     int size_pct = e->size_pct ? e->size_pct : (boss_sprite ? 118 : 100);
@@ -690,7 +720,7 @@ static void draw_enemy_sprite_with_hp(u8 *fb,
             if (u < 0) u = 0;
             if (u >= mask_w) u = mask_w - 1;
             bool on = boss_sprite ? ((e->boss_sprite[v] & (uint32_t)(1u << (BOSS_SPRITE_W - 1 - u))) != 0)
-                                  : ((e->sprite16[v] & (uint16_t)(1u << (ENEMY_SPRITE_W - 1 - u))) != 0);
+                                  : (((anim16 ? anim16[v] : e->sprite16[v]) & (uint16_t)(1u << (ENEMY_SPRITE_W - 1 - u))) != 0);
             if (!on) continue;
             if (!sprite_pixel_can_draw(sx, sy, transform_y)) continue;
             Color pc = c;
@@ -893,10 +923,23 @@ static bool draw_raycast_column_slice(u8 *fb,
         z1 = PLATFORM_TOP;
     } else if (hit_tile == TILE_DOOR) {
         float open = door_open_fraction_at(map_x, map_y);
-        float lower = open * 1.12f;
-        z0 = -lower;
-        z1 = 1.0f - lower;
-        if (z1 <= -0.05f) return false;
+        DoorMeta *dm = door_meta_find_at(map_x, map_y);
+        uint8_t move = dm ? dm->move_dir : DOOR_MOVE_UP;
+        float slide = open * 1.12f;
+        if (move == DOOR_MOVE_DOWN) {
+            z0 = -slide;
+            z1 = 1.0f - slide;
+            if (z1 <= -0.05f) return false;
+        } else if (move == DOOR_MOVE_UP) {
+            z0 = slide;
+            z1 = 1.0f + slide;
+            if (z0 >= 1.05f) return false;
+        } else {
+            float wall_x_test = (side_hit == 0) ? (pos_y + perp * ray_y) : (pos_x + perp * ray_x);
+            wall_x_test -= floorf(wall_x_test);
+            if (move == DOOR_MOVE_RIGHT && wall_x_test < open) return false;
+            if (move == DOOR_MOVE_LEFT && wall_x_test > 1.0f - open) return false;
+        }
     }
     z0 *= depth;
     z1 *= depth;
@@ -909,7 +952,7 @@ static bool draw_raycast_column_slice(u8 *fb,
     if (draw_end >= RENDER_H) draw_end = RENDER_H - 1;
     if (draw_end <= draw_start) return false;
 
-    Color base = (hit_tile == TILE_DOOR) ? (Color){150, 100, 45} : WALL_COLORS[hit_tile & 7];
+    Color base = (hit_tile == TILE_DOOR) ? door_texture_color(map_x, map_y) : wall_texture_color(hit_tile, map_x, map_y);
     float shade = 1.0f / (1.0f + perp * 0.12f);
     if (side_hit == 1) shade *= 0.72f;
     if (hit_tile == PLATFORM_TILE) shade *= 0.95f;
@@ -927,6 +970,24 @@ static bool draw_raycast_column_slice(u8 *fb,
     int sy0 = draw_start * PIXEL_SCALE;
     int sy1 = (draw_end + 1) * PIXEL_SCALE;
     fill_rect_raw(fb, TOP_W, TOP_H, sx0, sy0, sx1, sy1, c);
+
+    if (hit_tile != TILE_DOOR && hit_tile != PLATFORM_TILE) {
+        uint8_t tex = wall_texture_at(&g_level, map_x, map_y);
+        if (tex) {
+            Color line = apply_dof_fade(shade_color(blend_color(c, (Color){0,0,0}, 0.35f), shade), perp);
+            if ((tex & 1) != 0 && sy1 - sy0 > 20) {
+                int ymid = sy0 + (sy1 - sy0) / 2;
+                fill_rect_raw(fb, TOP_W, TOP_H, sx0, ymid, sx1, ymid + 1, line);
+            }
+            if ((tex & 2) != 0) {
+                fill_rect_raw(fb, TOP_W, TOP_H, sx0, sy0, sx0 + 1, sy1, line);
+            }
+            if ((tex & 4) != 0 && sy1 - sy0 > 12) {
+                int yq = sy0 + (sy1 - sy0) / 4;
+                fill_rect_raw(fb, TOP_W, TOP_H, sx0, yq, sx1, yq + 1, line);
+            }
+        }
+    }
 
     if (hit_tile == TILE_DOOR) {
         float wall_x = (side_hit == 0) ? (pos_y + perp * ray_y) : (pos_x + perp * ray_x);
@@ -1138,6 +1199,7 @@ static void render_raycast_eye(const Level *lv, gfx3dSide_t side, float eye_offs
                 hit_tile = 0;
                 continue;
             }
+            if (hit_tile == TILE_DOOR && !door_blocks_at(map_x, map_y)) { hit_tile = 0; continue; }
             if (tile_blocks_raycast(hit_tile)) break;
             hit_tile = 0;
         }
@@ -1166,7 +1228,7 @@ static void render_raycast_eye(const Level *lv, gfx3dSide_t side, float eye_offs
 
     }
 
-    if (!g_render_angle_override && !g_edit_mode) {
+    if (!g_render_angle_override) {
         int item_budget = 0;
         int npc_budget = 0;
         int enemy_budget = 0;
@@ -1207,7 +1269,8 @@ static void render_raycast_eye(const Level *lv, gfx3dSide_t side, float eye_offs
         for (int ni = 0; ni < g_npc_count && npc_budget < 10; ni++) {
             const NPC *n = &g_npcs[ni];
             if (!n->active) continue;
-            const uint16_t *nsp16 = n->sprite16;
+            const uint16_t *nsp16 = npc_anim_frame_for(n);
+            if (!nsp16) nsp16 = n->sprite16;
             bool npc16_empty = true;
             for (int si = 0; si < ENEMY_SPRITE_ROWS; si++) if (nsp16[si]) npc16_empty = false;
             float nx = (float)n->x + 0.5f;
@@ -1229,15 +1292,13 @@ static void render_raycast_eye(const Level *lv, gfx3dSide_t side, float eye_offs
             float ndy = ny - pos_y;
             float nd2 = ndx * ndx + ndy * ndy;
             bool show_text = false;
-            bool close_for_text = nd2 <= 12.0f * 12.0f;
-            if (close_for_text && n->talk_timer > 0.0f) show_text = true;
-            else if (n->text_mode == TEXT_MODE_NEAR && nd2 <= 10.0f * 10.0f) show_text = true;
-            else if (n->text_mode == TEXT_MODE_ALWAYS && nd2 <= 16.0f * 16.0f) show_text = true;
-            if (show_text) {
+            float text_radius = (n->text_mode == TEXT_MODE_ALWAYS) ? 16.0f : 10.0f;
+            if (nd2 <= text_radius * text_radius) show_text = true;
+            if (!g_edit_mode && show_text) {
                 float telapsed = n->talk_timer > 0.0f ? n->talk_timer : 999.0f;
                 draw_world_text_label_typed(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, zbuf,
                                       nx, ny, 0.65f,
-                                      n->completed ? "THANKS" : n->text, n->text_speed, telapsed, (Color){245,245,245}, (Color){15,20,28});
+                                      n->text, n->text_speed, telapsed, (Color){245,245,245}, (Color){15,20,28});
             }
         }
         for (int pi = 0; pi < g_projectile_count; pi++) {
@@ -1247,6 +1308,7 @@ static void render_raycast_eye(const Level *lv, gfx3dSide_t side, float eye_offs
             const uint8_t *psp = (pr->style == 1) ? ORB_SPRITE_8X8 : ((pr->style == 2) ? WAVE_SPRITE_8X8 : ARROW_SPRITE_8X8);
             float psz = 0.25f;
             if (pr->anim) psz += 0.035f * sinf((float)g_frame_counter * 0.22f + (float)pi);
+            draw_ground_shadow(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, pr->x, pr->y, sprite_base_z_at(pr->x, pr->y), psz * 0.80f, mask8_visible_width_ratio(psp));
             draw_billboard_masked_sprite_centered_z(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, zbuf,
                                          pr->x, pr->y, pr->z, psz, psp, npc_color_for(pr->color_id));
         }
@@ -1290,7 +1352,7 @@ static void render_raycast_eye(const Level *lv, gfx3dSide_t side, float eye_offs
             bool enemy_text_near = ed2 <= 6.0f * 6.0f;
             if (!e->dying && e->text_count > 0 && (e->text_timer > 0.0f || (e->state && enemy_text_near))) eline = e->text[e->text_index % e->text_count];
             else if (!e->dying && e->state && enemy_text_near) eline = "!!!";
-            if (eline && eline[0]) {
+            if (!g_edit_mode && eline && eline[0]) {
                 float eelapsed = e->text_timer > 0.0f ? (1.1f - e->text_timer) : 999.0f;
                 draw_world_text_label_typed(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, zbuf,
                                       e->x, e->y, 0.74f, eline, e->text_speed, eelapsed, (Color){255,235,210}, (Color){35,8,8});
@@ -1622,17 +1684,41 @@ void render_bottom_map(void) {
         }
     }
 
-    if (!g_edit_mode) {
-        for (int ei = 0; ei < g_enemy_count; ei++) {
-            const Enemy *e = &g_enemies[ei];
-            if (!e->active) continue;
-            if ((int)e->x >= vx && (int)e->x < vx + vw && (int)e->y >= vy && (int)e->y < vy + vh) {
-                int ex = ox + (int)((e->x - (float)vx) * cell);
-                int ey = oy + (int)((e->y - (float)vy) * cell);
-                int er = cell >= 10 ? 3 : 2;
-                fill_rect_raw(fb, BOT_W, BOT_H, ex - er, ey - er, ex + er + 1, ey + er + 1,
-                              e->state ? (Color){255, 60, 60} : (Color){210, 70, 220});
-            }
+    for (int ci = 0; ci < g_collectible_count; ci++) {
+        const Collectible *c = &g_collectibles[ci];
+        if (!c->active) continue;
+        int cx = (int)c->fx;
+        int cy = (int)c->fy;
+        if (cx >= vx && cx < vx + vw && cy >= vy && cy < vy + vh) {
+            int sx = ox + (int)((c->fx - (float)vx) * cell);
+            int sy = oy + (int)((c->fy - (float)vy) * cell);
+            Color cc = (c->kind == REWARD_KEY) ? (Color){255,230,80} : ((c->kind == REWARD_HEALTH) ? (Color){255,80,105} : (Color){245,205,55});
+            int cr = cell >= 10 ? 2 : 1;
+            fill_rect_raw(fb, BOT_W, BOT_H, sx - cr, sy - cr, sx + cr + 1, sy + cr + 1, cc);
+        }
+    }
+
+    for (int di = 0; di < g_door_count; di++) {
+        const Door *d = &g_doors[di];
+        if (!d->active) continue;
+        if (d->x >= vx && d->x < vx + vw && d->y >= vy && d->y < vy + vh) {
+            int dx = ox + (d->x - vx) * cell + cell / 2;
+            int dy = oy + (d->y - vy) * cell + cell / 2;
+            Color dc = (d->door_type == DOOR_TYPE_KEY) ? (Color){255,210,70} : ((d->door_type == DOOR_TYPE_TOGGLE) ? (Color){120,220,255} : ((d->door_type == DOOR_TYPE_SWITCH) ? (Color){120,255,150} : (Color){200,150,80}));
+            int dr = cell >= 10 ? 3 : 2;
+            fill_rect_raw(fb, BOT_W, BOT_H, dx - dr, dy - dr, dx + dr + 1, dy + dr + 1, dc);
+        }
+    }
+
+    for (int ei = 0; ei < g_enemy_count; ei++) {
+        const Enemy *e = &g_enemies[ei];
+        if (!e->active) continue;
+        if ((int)e->x >= vx && (int)e->x < vx + vw && (int)e->y >= vy && (int)e->y < vy + vh) {
+            int ex = ox + (int)((e->x - (float)vx) * cell);
+            int ey = oy + (int)((e->y - (float)vy) * cell);
+            int er = cell >= 10 ? 3 : 2;
+            fill_rect_raw(fb, BOT_W, BOT_H, ex - er, ey - er, ex + er + 1, ey + er + 1,
+                          e->state ? (Color){255, 60, 60} : (Color){210, 70, 220});
         }
     }
 
@@ -1687,284 +1773,7 @@ void render_bottom_map(void) {
 }
 
 
-static const char *entity_reward_name(int kind) {
-    static char buf[20];
-    if (kind == REWARD_DOT) return "DOT";
-    if (kind == REWARD_KEY) return "KEY";
-    if (kind == REWARD_PINK) return "PINK";
-    if (kind == REWARD_PURPLE) return "PURPLE";
-    if (kind >= REWARD_WEAPON_BASE && kind < REWARD_WEAPON_BASE + MAX_WEAPONS) {
-        snprintf(buf, sizeof(buf), "%s", weapon_name(kind - REWARD_WEAPON_BASE));
-        return buf;
-    }
-    return "ITEM";
-}
-
-static const char *entity_quest_name(int q) {
-    switch (q) {
-        case QUEST_NONE: return "READY";
-        case QUEST_COINS: return "COINS";
-        case QUEST_KEY: return "KEYS";
-        case QUEST_NPC: return "NPC";
-        default: return "?";
-    }
-}
-
-static void draw_entity_edit_row(u8 *fb, int row, const char *label, const char *value) {
-    int visible = (g_entity_edit_mode == EDIT_MODE_WEAPON) ? 8 : 12;
-    if (row < g_entity_edit_scroll || row >= g_entity_edit_scroll + visible) return;
-    int y = 42 + (row - g_entity_edit_scroll) * 15;
-    Color bg = (g_entity_edit_cursor == row) ? (Color){48, 66, 102} : (Color){16, 18, 28};
-    Color fg = (g_entity_edit_cursor == row) ? (Color){255, 230, 150} : (Color){230, 230, 230};
-    fill_rect_raw(fb, BOT_W, BOT_H, 10, y - 2, BOT_W - 10, y + 12, bg);
-    draw_text3x5(fb, BOT_W, BOT_H, 16, y + 2, label, fg, 1);
-    draw_text3x5(fb, BOT_W, BOT_H, 128, y + 2, value ? value : "", fg, 1);
-}
-
-static NPC *render_find_npc_at_edit_pos(void) {
-    for (int i = 0; i < g_npc_count; i++) {
-        if (g_npcs[i].active && g_npcs[i].x == g_entity_edit_x && g_npcs[i].y == g_entity_edit_y) return &g_npcs[i];
-    }
-    return NULL;
-}
-
-static EnemyMeta *render_find_enemy_meta_at_edit_pos(void) {
-    for (int i = 0; i < g_enemy_meta_count; i++) {
-        if (g_enemy_metas[i].active && g_enemy_metas[i].x == g_entity_edit_x && g_enemy_metas[i].y == g_entity_edit_y) return &g_enemy_metas[i];
-    }
-    return NULL;
-}
-
-static NPC *render_edit_npc(void) {
-    if (g_entity_edit_mode != EDIT_MODE_NPC) return NULL;
-    return render_find_npc_at_edit_pos();
-}
-
-static EnemyMeta *render_edit_enemy_meta(void) {
-    if (g_entity_edit_mode != EDIT_MODE_ENEMY) return NULL;
-    return render_find_enemy_meta_at_edit_pos();
-}
-
-
-static void draw_sprite_preview_grid(u8 *fb, int x0, int y0, const uint8_t *sp, Color c, int scale, int cx, int cy) {
-    if (!sp) return;
-    for (int y = 0; y < 8; y++) {
-        for (int x = 0; x < 8; x++) {
-            bool on = (sp[y] & (1 << (7 - x))) != 0;
-            Color cell = on ? c : (Color){22, 24, 32};
-            fill_rect_raw(fb, BOT_W, BOT_H, x0 + x * scale, y0 + y * scale,
-                          x0 + (x + 1) * scale - 1, y0 + (y + 1) * scale - 1, cell);
-            if (x == cx && y == cy) {
-                fill_rect_raw(fb, BOT_W, BOT_H, x0 + x * scale, y0 + y * scale,
-                              x0 + (x + 1) * scale - 1, y0 + y * scale + 2, (Color){255,255,255});
-                fill_rect_raw(fb, BOT_W, BOT_H, x0 + x * scale, y0 + y * scale,
-                              x0 + x * scale + 2, y0 + (y + 1) * scale - 1, (Color){255,255,255});
-            }
-        }
-    }
-}
-
-static void draw_enemy16_sprite_preview_grid(u8 *fb, int x0, int y0, const uint16_t *sp, Color c, int scale, int cx, int cy) {
-    if (!sp) return;
-    for (int y = 0; y < ENEMY_SPRITE_H; y++) {
-        for (int x = 0; x < ENEMY_SPRITE_W; x++) {
-            bool on = (sp[y] & (uint16_t)(1u << (ENEMY_SPRITE_W - 1 - x))) != 0;
-            Color cell = on ? c : (Color){22, 24, 32};
-            fill_rect_raw(fb, BOT_W, BOT_H, x0 + x * scale, y0 + y * scale,
-                          x0 + (x + 1) * scale - 1, y0 + (y + 1) * scale - 1, cell);
-            if (x == cx && y == cy) {
-                fill_rect_raw(fb, BOT_W, BOT_H, x0 + x * scale, y0 + y * scale,
-                              x0 + (x + 1) * scale - 1, y0 + y * scale + 2, (Color){255,255,255});
-                fill_rect_raw(fb, BOT_W, BOT_H, x0 + x * scale, y0 + y * scale,
-                              x0 + x * scale + 2, y0 + (y + 1) * scale - 1, (Color){255,255,255});
-            }
-        }
-    }
-}
-
-static void draw_boss_sprite_preview_grid(u8 *fb, int x0, int y0, const uint32_t *sp, Color c, int scale, int cx, int cy) {
-    if (!sp) return;
-    for (int y = 0; y < BOSS_SPRITE_H; y++) {
-        for (int x = 0; x < BOSS_SPRITE_W; x++) {
-            bool on = (sp[y] & (uint32_t)(1u << (BOSS_SPRITE_W - 1 - x))) != 0;
-            Color cell = on ? c : (Color){22, 24, 32};
-            fill_rect_raw(fb, BOT_W, BOT_H, x0 + x * scale, y0 + y * scale,
-                          x0 + (x + 1) * scale - 1, y0 + (y + 1) * scale - 1, cell);
-            if (x == cx && y == cy) {
-                fill_rect_raw(fb, BOT_W, BOT_H, x0 + x * scale, y0 + y * scale,
-                              x0 + (x + 1) * scale - 1, y0 + y * scale + 2, (Color){255,255,255});
-                fill_rect_raw(fb, BOT_W, BOT_H, x0 + x * scale, y0 + y * scale,
-                              x0 + x * scale + 2, y0 + (y + 1) * scale - 1, (Color){255,255,255});
-            }
-        }
-    }
-}
-
-static uint32_t *render_boss_sprite_pixels(void) {
-    if (g_sprite_edit_target == SPRITE_TARGET_BOSS) {
-        EnemyMeta *m = render_find_enemy_meta_at_edit_pos();
-        return m ? m->boss_sprite : NULL;
-    }
-    return NULL;
-}
-
-static uint16_t *render_enemy16_sprite_pixels(void) {
-    if (g_sprite_edit_target == SPRITE_TARGET_NPC) {
-        NPC *n = render_find_npc_at_edit_pos();
-        return n ? n->sprite16 : NULL;
-    }
-    if (g_sprite_edit_target == SPRITE_TARGET_DEFAULT_NPC) return g_default_npc_sprite16;
-    if (g_sprite_edit_target == SPRITE_TARGET_ENEMY) {
-        EnemyMeta *m = render_find_enemy_meta_at_edit_pos();
-        return m ? m->sprite16 : NULL;
-    }
-    return NULL;
-}
-
-static uint8_t *render_sprite_pixels(void) {
-    if (g_sprite_edit_target == SPRITE_TARGET_NPC) {
-        return NULL; /* NPC art is edited as 16x16 now. */
-    }
-    if (g_sprite_edit_target == SPRITE_TARGET_ENEMY) {
-        EnemyMeta *m = render_find_enemy_meta_at_edit_pos();
-        return m ? m->sprite : NULL;
-    }
-    if (g_sprite_edit_target == SPRITE_TARGET_WEAPON) {
-        int wi = clampi32(g_entity_edit_weapon, 0, MAX_WEAPONS - 1);
-        return g_weapons[wi].sprite;
-    }
-    if (g_sprite_edit_target == SPRITE_TARGET_DEFAULT_NPC) return NULL; /* Default NPC art is edited as 16x16 now. */
-    return NULL;
-}
-
-static uint8_t render_sprite_color_id(void) {
-    if (g_sprite_edit_target == SPRITE_TARGET_NPC) { NPC *n = render_find_npc_at_edit_pos(); return n ? n->color_id : 0; }
-    if (g_sprite_edit_target == SPRITE_TARGET_ENEMY || g_sprite_edit_target == SPRITE_TARGET_BOSS) { EnemyMeta *m = render_find_enemy_meta_at_edit_pos(); return m ? m->color_id : 0; }
-    if (g_sprite_edit_target == SPRITE_TARGET_WEAPON) return g_weapons[clampi32(g_entity_edit_weapon, 0, MAX_WEAPONS - 1)].color_id;
-    if (g_sprite_edit_target == SPRITE_TARGET_DEFAULT_NPC) return g_default_npc_color;
-    return 0;
-}
-
-void render_sprite_editor(u8 *fb) {
-    if (!fb) return;
-    uint8_t *sp = render_sprite_pixels();
-    uint32_t *bsp = render_boss_sprite_pixels();
-    uint16_t *esp16 = render_enemy16_sprite_pixels();
-    fill_rect_raw(fb, BOT_W, BOT_H, 0, 0, BOT_W, BOT_H, (Color){7, 8, 14});
-    fill_rect_raw(fb, BOT_W, BOT_H, 0, 0, BOT_W, 28, (Color){18, 24, 42});
-    draw_text3x5(fb, BOT_W, BOT_H, 8, 7, bsp ? "BOSS 32X32 ART" : (esp16 ? ((g_sprite_edit_target == SPRITE_TARGET_NPC || g_sprite_edit_target == SPRITE_TARGET_DEFAULT_NPC) ? "NPC 16X16 ART" : "ENEMY 16X16 ART") : "SPRITE ART EDITOR"), (Color){255,235,170}, 2);
-    if (!sp && !bsp && !esp16) { draw_text3x5(fb, BOT_W, BOT_H, 20, 50, "NO SPRITE", (Color){255,120,120}, 2); return; }
-    Color c = npc_color_for(render_sprite_color_id());
-    if (bsp) draw_boss_sprite_preview_grid(fb, 88, 36, bsp, c, 4, g_sprite_edit_cursor_x, g_sprite_edit_cursor_y);
-    else if (esp16) draw_enemy16_sprite_preview_grid(fb, 108, 40, esp16, c, 7, g_sprite_edit_cursor_x, g_sprite_edit_cursor_y);
-    else draw_sprite_preview_grid(fb, 96, 44, sp, c, 14, g_sprite_edit_cursor_x, g_sprite_edit_cursor_y);
-    draw_text3x5(fb, BOT_W, BOT_H, 22, 44, "D-PAD MOVE", (Color){210,210,210}, 1);
-    draw_text3x5(fb, BOT_W, BOT_H, 22, 58, "A TOGGLE", (Color){210,210,210}, 1);
-    draw_text3x5(fb, BOT_W, BOT_H, 22, 72, "L/R COLOR", (Color){210,210,210}, 1);
-    draw_text3x5(fb, BOT_W, BOT_H, 22, 86, "Y PRESET", (Color){210,210,210}, 1);
-    draw_text3x5(fb, BOT_W, BOT_H, 22, 100, "X CLEAR", (Color){210,210,210}, 1);
-    draw_text3x5(fb, BOT_W, BOT_H, 22, 114, bsp ? "32X32 BOSS" : (esp16 ? "16X16 ART" : "8X8 ART"), (Color){220,220,170}, 1);
-    draw_text3x5(fb, BOT_W, BOT_H, 22, 226, "B BACK - ART SAVES IN BW3/ENM5", (Color){190,200,220}, 1);
-}
-
-static const char *text_speed_name(uint8_t speed) {
-    switch (speed) {
-        case TEXT_SPEED_INSTANT: return "INSTANT";
-        case TEXT_SPEED_SLOW: return "SLOW";
-        case TEXT_SPEED_FAST: return "FAST";
-        case TEXT_SPEED_MEDIUM:
-        default: return "MEDIUM";
-    }
-}
-
-static const char *render_ai_rank_name(uint8_t rank) {
-    if (rank == AI_RANK_BOSS) return "BOSS";
-    if (rank == AI_RANK_CAPTAIN) return "CAPTAIN";
-    return "GRUNT";
-}
-
-static const char *render_ai_spawn_name(uint8_t kind) {
-    if (kind == AI_SPAWN_GRUNT) return "GRUNT";
-    return "NONE";
-}
-
-void render_entity_editor(u8 *fb) {
-    if (!fb || g_entity_edit_mode == EDIT_MODE_NONE) return;
-    if (g_entity_edit_mode == EDIT_MODE_SPRITE) { render_sprite_editor(fb); return; }
-    fill_rect_raw(fb, BOT_W, BOT_H, 0, 0, BOT_W, BOT_H, (Color){7, 8, 14});
-    fill_rect_raw(fb, BOT_W, BOT_H, 0, 0, BOT_W, 28, (Color){18, 24, 42});
-    draw_text3x5(fb, BOT_W, BOT_H, 8, 7,
-                 g_entity_edit_mode == EDIT_MODE_NPC ? "NPC EDITOR" : (g_entity_edit_mode == EDIT_MODE_ENEMY ? "ENEMY EDITOR" : "WEAPON EDITOR"),
-                 (Color){255, 235, 170}, 2);
-    draw_text3x5(fb, BOT_W, BOT_H, 8, 226, "DUP/DDOWN SCROLL  D<> VALUE  L/R FAST  A EDIT  B BACK", (Color){190, 200, 220}, 1);
-
-    char buf[64];
-    if (g_entity_edit_mode == EDIT_MODE_NPC) {
-        NPC *n = render_edit_npc();
-        if (!n) { draw_text3x5(fb, BOT_W, BOT_H, 16, 52, "NPC NOT FOUND", (Color){255,120,120}, 1); return; }
-        snprintf(buf, sizeof(buf), "%d,%d", n->x, n->y); draw_entity_edit_row(fb, 0, "TEXT", n->text[0] ? n->text : "HELLO");
-        snprintf(buf, sizeof(buf), "%s", entity_quest_name(n->quest_type)); draw_entity_edit_row(fb, 1, "QUEST", buf);
-        snprintf(buf, sizeof(buf), "%d", n->quest_target); draw_entity_edit_row(fb, 2, "TARGET", buf);
-        snprintf(buf, sizeof(buf), "%s", entity_reward_name(n->reward_kind)); draw_entity_edit_row(fb, 3, "REWARD", buf);
-        snprintf(buf, sizeof(buf), "%d", n->reward_amount); draw_entity_edit_row(fb, 4, "AMOUNT", buf);
-        const char *tm = (n->text_mode == TEXT_MODE_INTERACT) ? "INTERACT" : ((n->text_mode == TEXT_MODE_NEAR) ? "NEAR" : "FAR OK");
-        draw_entity_edit_row(fb, 5, "TEXT MODE", tm);
-        draw_entity_edit_row(fb, 6, "TEXT SPEED", text_speed_name(n->text_speed));
-        snprintf(buf, sizeof(buf), "%d", n->color_id & 7); draw_entity_edit_row(fb, 7, "NPC COLOR", buf);
-        draw_entity_edit_row(fb, 8, "EDIT ART", "A OPEN");
-        snprintf(buf, sizeof(buf), "%d", g_default_npc_color & 7); draw_entity_edit_row(fb, 9, "DEFAULT COLOR", buf);
-        draw_entity_edit_row(fb, 10, "DEFAULT ART", "A OPEN");
-        draw_entity_edit_row(fb, 11, "USE DEFAULT", "A APPLY");
-        draw_entity_edit_row(fb, 12, "EDIT WEAPON", (n->reward_kind >= REWARD_WEAPON_BASE) ? entity_reward_name(n->reward_kind) : "A OPEN");
-        draw_entity_edit_row(fb, 13, "DONE", "A CLOSE");
-        draw_enemy16_sprite_preview_grid(fb, 258, 34, n->sprite16, npc_color_for(n->color_id), 3, -1, -1);
-    } else if (g_entity_edit_mode == EDIT_MODE_ENEMY) {
-        EnemyMeta *m = render_edit_enemy_meta();
-        if (!m) { draw_text3x5(fb, BOT_W, BOT_H, 16, 52, "ENEMY NOT FOUND", (Color){255,120,120}, 1); return; }
-        char joined[96]; joined[0] = '\0';
-        for (int i = 0; i < m->text_count && i < ENEMY_TEXT_LINES; i++) {
-            if (i) strncat(joined, "|", sizeof(joined) - strlen(joined) - 1);
-            strncat(joined, m->text[i], sizeof(joined) - strlen(joined) - 1);
-        }
-        draw_entity_edit_row(fb, 0, "TEXT LINES", joined[0] ? joined : "HEY|OUCH");
-        snprintf(buf, sizeof(buf), "%d", m->hp ? m->hp : 5); draw_entity_edit_row(fb, 1, "HEALTH", buf);
-        snprintf(buf, sizeof(buf), "%d", m->attack ? m->attack : 1); draw_entity_edit_row(fb, 2, "ATTACK", buf);
-        snprintf(buf, sizeof(buf), "%d%%", m->speed_attr ? m->speed_attr : 100); draw_entity_edit_row(fb, 3, "SPEED", buf);
-        snprintf(buf, sizeof(buf), "%d%%", m->size_pct ? m->size_pct : 100); draw_entity_edit_row(fb, 4, "SIZE", buf);
-        draw_entity_edit_row(fb, 5, "TEXT SPEED", text_speed_name(m->text_speed));
-        snprintf(buf, sizeof(buf), "%d", m->color_id & 7); draw_entity_edit_row(fb, 6, "COLOR", buf);
-        draw_entity_edit_row(fb, 7, "AI RANK", render_ai_rank_name(m->ai_rank));
-        draw_entity_edit_row(fb, 8, "PROJECTILE", m->ranged_attack ? "YES" : "NO");
-        snprintf(buf, sizeof(buf), "%.1f", (float)(m->melee_range ? m->melee_range : 7) * 0.10f); draw_entity_edit_row(fb, 9, "ATK RANGE", buf);
-        snprintf(buf, sizeof(buf), "%.1fS", (float)(m->attack_cooldown ? m->attack_cooldown : 7) * 0.10f); draw_entity_edit_row(fb, 10, "ATK COOLDN", buf);
-        snprintf(buf, sizeof(buf), "%d", m->spawn_limit); draw_entity_edit_row(fb, 11, "SPAWN MAX", buf);
-        draw_entity_edit_row(fb, 12, "SPAWN TYPE", render_ai_spawn_name(m->spawn_kind));
-        snprintf(buf, sizeof(buf), "%.1fS", (float)(m->spawn_cooldown ? m->spawn_cooldown : 25) * 0.10f); draw_entity_edit_row(fb, 13, "SPAWN CD", buf);
-        snprintf(buf, sizeof(buf), "%d", m->sight_range ? m->sight_range : (m->ai_rank == AI_RANK_BOSS ? 20 : (m->ai_rank == AI_RANK_CAPTAIN ? 16 : 13))); draw_entity_edit_row(fb, 14, "SIGHT RNG", buf);
-        snprintf(buf, sizeof(buf), "%d", m->command_range ? m->command_range : 10); draw_entity_edit_row(fb, 15, "COMMAND RNG", buf);
-        snprintf(buf, sizeof(buf), "%d", m->projectile_color & 7); draw_entity_edit_row(fb, 16, "PROJ COLOR", buf);
-        snprintf(buf, sizeof(buf), "%d", m->projectile_style % 3); draw_entity_edit_row(fb, 17, "PROJ STYLE", buf);
-        draw_entity_edit_row(fb, 18, "PROJ ANIM", m->projectile_anim ? "YES" : "NO");
-        draw_entity_edit_row(fb, 19, "ENEMY 16X16", "A OPEN");
-        draw_entity_edit_row(fb, 20, "BOSS 32X32", "A OPEN");
-        snprintf(buf, sizeof(buf), "%d", g_player_health_max); draw_entity_edit_row(fb, 21, "PLAYER HP", buf);
-        draw_entity_edit_row(fb, 22, "DONE", "A CLOSE");
-        if (m->ai_rank == AI_RANK_BOSS) draw_boss_sprite_preview_grid(fb, 246, 34, m->boss_sprite, npc_color_for(m->color_id), 2, -1, -1);
-        else draw_enemy16_sprite_preview_grid(fb, 258, 34, m->sprite16, npc_color_for(m->color_id), 3, -1, -1);
-    } else if (g_entity_edit_mode == EDIT_MODE_WEAPON) {
-        int wi = clampi32(g_entity_edit_weapon, 0, MAX_WEAPONS - 1);
-        WeaponDef *w = &g_weapons[wi];
-        snprintf(buf, sizeof(buf), "%d %s", wi, weapon_name(wi)); draw_entity_edit_row(fb, 0, "WEAPON", buf);
-        draw_entity_edit_row(fb, 1, "NAME", w->name);
-        snprintf(buf, sizeof(buf), "%d", w->damage); draw_entity_edit_row(fb, 2, "DAMAGE", buf);
-        snprintf(buf, sizeof(buf), "%d", w->range); draw_entity_edit_row(fb, 3, "RANGE", buf);
-        snprintf(buf, sizeof(buf), "%d", w->cooldown); draw_entity_edit_row(fb, 4, "COOLDOWN", buf);
-        snprintf(buf, sizeof(buf), "%d", w->color_id & 7); draw_entity_edit_row(fb, 5, "COLOR", buf);
-        draw_entity_edit_row(fb, 6, "EDIT ICON", "A OPEN");
-        draw_entity_edit_row(fb, 7, "DONE", "A CLOSE");
-        draw_sprite_preview_grid(fb, 270, 34, w->sprite, npc_color_for(w->color_id), 4, -1, -1);
-    }
-}
+/* Bottom-screen entity/sprite editor moved to source/editor.c. */
 
 const char *menu_action_name(int action) {
     switch (action) {
