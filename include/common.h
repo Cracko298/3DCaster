@@ -120,11 +120,14 @@
 #define EDIT_MODE_ENEMY 2
 #define EDIT_MODE_WEAPON 3
 #define EDIT_MODE_SPRITE 4
+#define EDIT_MODE_DOOR 5
 #define SPRITE_TARGET_NPC 1
 #define SPRITE_TARGET_ENEMY 2
 #define SPRITE_TARGET_WEAPON 3
 #define SPRITE_TARGET_DEFAULT_NPC 4
 #define SPRITE_TARGET_BOSS 5
+#define SPRITE_TARGET_NPC_ANIM 6
+#define SPRITE_TARGET_ENEMY_ANIM 7
 #define QUEST_NONE 0
 #define QUEST_COINS 1
 #define QUEST_KEY 2
@@ -151,6 +154,31 @@
 #define KEY_PICKUP_RADIUS 0.48f
 #define DOOR_TRIGGER_RADIUS 1.35f
 #define DOOR_OPEN_TIME 0.72f
+#define MAX_TEXTURE_ID 7
+#define DOOR_TYPE_AUTO 0
+#define DOOR_TYPE_KEY 1
+#define DOOR_TYPE_TOGGLE 2
+#define DOOR_TYPE_SWITCH 3
+#define DOOR_SPEED_SLOW 0
+#define DOOR_SPEED_MEDIUM 1
+#define DOOR_SPEED_FAST 2
+#define DOOR_MOVE_UP 0
+#define DOOR_MOVE_DOWN 1
+#define DOOR_MOVE_LEFT 2
+#define DOOR_MOVE_RIGHT 3
+#define MAX_DOOR_GROUP_SIZE 3
+#define ANIM_SPEED_OFF 0
+#define ANIM_SPEED_SLOW 1
+#define ANIM_SPEED_MEDIUM 2
+#define ANIM_SPEED_FAST 3
+#define NPC_ANIM_IDLE 0
+#define NPC_ANIM_TALK 1
+#define NPC_ANIM_COMPLETE 2
+#define ENEMY_ANIM_IDLE 0
+#define ENEMY_ANIM_MOVE 1
+#define ENEMY_ANIM_ATTACK 2
+#define ENEMY_ANIM_SHOOT 3
+#define ANIM_FRAMES 3
 #define RANDOM_MAZE_CELLS_W 31
 #define RANDOM_MAZE_CELLS_H 31
 #define RANDOM_MAZE_W (RANDOM_MAZE_CELLS_W * 4 + 2)
@@ -214,6 +242,8 @@ typedef struct {
     uint8_t sprite[SPRITE_BYTES];
     uint16_t sprite16[ENEMY_SPRITE_ROWS];
     float text_timer;
+    float anim_timer;
+    uint8_t anim_frame;
     uint8_t ai_rank;
     uint8_t spawn_kind;
     uint8_t spawn_limit;
@@ -249,7 +279,46 @@ typedef struct {
     bool opening;
     int x, y;
     float open_t;
+    uint8_t texture_id;
+    uint8_t group_id;
+    uint8_t door_type;
+    uint8_t speed;
+    uint8_t move_dir;
+    bool switch_pressed;
+    bool toggled;
 } Door;
+
+typedef struct {
+    bool active;
+    int x, y;
+    uint8_t texture_id;
+    uint8_t group_id;
+    uint8_t door_type;
+    uint8_t speed;
+    uint8_t move_dir;
+    bool switch_pressed;
+    bool toggled;
+} DoorMeta;
+
+typedef struct {
+    bool active;
+    int x, y;
+    bool enabled;
+    uint8_t speed;
+    uint8_t edit_state;
+    uint8_t edit_frame;
+    uint16_t frames[3][ANIM_FRAMES][ENEMY_SPRITE_ROWS];
+} NPCAnim;
+
+typedef struct {
+    bool active;
+    int x, y;
+    bool enabled;
+    uint8_t speed;
+    uint8_t edit_state;
+    uint8_t edit_frame;
+    uint16_t frames[4][ANIM_FRAMES][ENEMY_SPRITE_ROWS];
+} EnemyAnim;
 
 typedef struct {
     bool active;
@@ -353,6 +422,11 @@ extern Projectile g_projectiles[MAX_PROJECTILES];
 extern NPC g_npcs[MAX_NPCS];
 extern EnemyMeta g_enemy_metas[MAX_ENEMIES];
 extern uint8_t g_room_tiles[MAX_TILES];
+extern uint8_t g_wall_textures[MAX_TILES];
+extern uint8_t g_floor_textures[MAX_TILES];
+extern DoorMeta g_door_metas[MAX_DOORS];
+extern NPCAnim g_npc_anims[MAX_NPCS];
+extern EnemyAnim g_enemy_anims[MAX_ENEMIES];
 extern WeaponDef g_weapons[MAX_WEAPONS];
 extern SlotInfo g_slots[SLOT_COUNT];
 extern bool g_in_menu;
@@ -406,6 +480,11 @@ extern int g_door_count;
 extern int g_projectile_count;
 extern int g_npc_count;
 extern int g_enemy_meta_count;
+extern int g_door_meta_count;
+extern int g_npc_anim_count;
+extern int g_enemy_anim_count;
+extern int g_anim_edit_state;
+extern int g_anim_edit_frame;
 extern int g_player_keys;
 extern int g_player_score;
 extern int g_coins_bank;
@@ -480,11 +559,32 @@ void set_tile(Level *lv, int x, int y, uint8_t v);
 uint8_t room_at(const Level *lv, int x, int y);
 void set_room(Level *lv, int x, int y, uint8_t v);
 void clear_room_overlay(void);
+void clear_texture_overlays(void);
+void clear_extended_entity_metadata(void);
+uint8_t wall_texture_at(const Level *lv, int x, int y);
+uint8_t floor_texture_at(const Level *lv, int x, int y);
+uint8_t door_texture_at(int x, int y);
+void set_wall_texture(Level *lv, int x, int y, uint8_t v);
+void set_floor_texture(Level *lv, int x, int y, uint8_t v);
+DoorMeta *door_meta_find_at(int x, int y);
+DoorMeta *door_meta_ensure_at(int x, int y);
+NPCAnim *npc_anim_find_at(int x, int y);
+NPCAnim *npc_anim_ensure_at(int x, int y);
+EnemyAnim *enemy_anim_find_at(int x, int y);
+EnemyAnim *enemy_anim_ensure_at(int x, int y);
+const char *door_type_name(uint8_t t);
+const char *door_speed_name(uint8_t s);
+const char *door_move_name(uint8_t d);
+const char *anim_speed_name(uint8_t s);
+float door_speed_seconds(uint8_t s);
+const uint16_t *npc_anim_frame_for(const NPC *n);
+const uint16_t *enemy_anim_frame_for(const Enemy *e);
 const char *room_class_name(uint8_t room);
 Color room_class_color(uint8_t room);
 bool tile_blocks_side(uint8_t tile, float z);
 bool tile_blocks_raycast(uint8_t tile);
 float door_open_fraction_at(int x, int y);
+bool door_blocks_at(int x, int y);
 bool can_stand_at(const Level *lv, float x, float y, float z);
 float ground_height_at(const Level *lv, float x, float y, float z);
 void force_valid_spawn(Level *lv);
