@@ -52,7 +52,7 @@ bool encode_bwl2_memory(const Level *lv, uint8_t **out_data, size_t *out_size) {
     if (lv->width < 3 || lv->height < 3 || lv->width > MAX_MAP_W || lv->height > MAX_MAP_H) return false;
 
     int n = lv->width * lv->height;
-    size_t cap = (size_t)n * 2 + 32768;
+    size_t cap = (size_t)n * 2 + 131072;
     uint8_t *out = (uint8_t*)malloc(cap);
     if (!out) return false;
 
@@ -188,6 +188,62 @@ bool encode_bwl2_memory(const Level *lv, uint8_t **out_data, size_t *out_size) {
             ok = ok && mem_put_u8(out, cap, &pos, (uint8_t)len);
             for (int ti = 0; ok && ti < len; ti++) ok = ok && mem_put_u8(out, cap, &pos, (uint8_t)m->text[li][ti]);
         }
+    }
+
+    /* Wall/floor/door texture chunks */
+    ok = ok && mem_put_u8(out, cap, &pos, 'W') && mem_put_u8(out, cap, &pos, 'T') && mem_put_u8(out, cap, &pos, 'X') && mem_put_u8(out, cap, &pos, '1');
+    ok = ok && mem_put_u32_le(out, cap, &pos, (uint32_t)n);
+    for (int ti = 0; ok && ti < n; ti++) ok = ok && mem_put_u8(out, cap, &pos, g_wall_textures[ti] & MAX_TEXTURE_ID);
+
+    ok = ok && mem_put_u8(out, cap, &pos, 'F') && mem_put_u8(out, cap, &pos, 'T') && mem_put_u8(out, cap, &pos, 'X') && mem_put_u8(out, cap, &pos, '1');
+    ok = ok && mem_put_u32_le(out, cap, &pos, (uint32_t)n);
+    for (int ti = 0; ok && ti < n; ti++) ok = ok && mem_put_u8(out, cap, &pos, g_floor_textures[ti] & MAX_TEXTURE_ID);
+
+    ok = ok && mem_put_u8(out, cap, &pos, 'D') && mem_put_u8(out, cap, &pos, 'T') && mem_put_u8(out, cap, &pos, 'X') && mem_put_u8(out, cap, &pos, '1');
+    int dm_count = (lv == &g_level) ? g_door_meta_count : 0;
+    if (dm_count > MAX_DOORS) dm_count = MAX_DOORS;
+    ok = ok && mem_put_u8(out, cap, &pos, (uint8_t)dm_count);
+    for (int di = 0; ok && di < dm_count; di++) {
+        const DoorMeta *d = &g_door_metas[di];
+        ok = ok && mem_put_u16_le(out, cap, &pos, (uint16_t)d->x);
+        ok = ok && mem_put_u16_le(out, cap, &pos, (uint16_t)d->y);
+        ok = ok && mem_put_u8(out, cap, &pos, d->texture_id & MAX_TEXTURE_ID);
+        ok = ok && mem_put_u8(out, cap, &pos, d->group_id);
+        ok = ok && mem_put_u8(out, cap, &pos, d->door_type <= DOOR_TYPE_SWITCH ? d->door_type : DOOR_TYPE_AUTO);
+        ok = ok && mem_put_u8(out, cap, &pos, d->speed <= DOOR_SPEED_FAST ? d->speed : DOOR_SPEED_MEDIUM);
+        ok = ok && mem_put_u8(out, cap, &pos, d->move_dir <= DOOR_MOVE_RIGHT ? d->move_dir : DOOR_MOVE_UP);
+        ok = ok && mem_put_u8(out, cap, &pos, d->switch_pressed ? 1 : 0);
+        ok = ok && mem_put_u8(out, cap, &pos, d->toggled ? 1 : 0);
+    }
+
+    /* NANM version 1: NPC animation data, off by default. */
+    ok = ok && mem_put_u8(out, cap, &pos, 'N') && mem_put_u8(out, cap, &pos, 'A') && mem_put_u8(out, cap, &pos, 'N') && mem_put_u8(out, cap, &pos, 'M');
+    ok = ok && mem_put_u8(out, cap, &pos, 1);
+    int na_count = (lv == &g_level) ? g_npc_anim_count : 0;
+    if (na_count > MAX_NPCS) na_count = MAX_NPCS;
+    ok = ok && mem_put_u8(out, cap, &pos, (uint8_t)na_count);
+    for (int ai = 0; ok && ai < na_count; ai++) {
+        const NPCAnim *a = &g_npc_anims[ai];
+        ok = ok && mem_put_u16_le(out, cap, &pos, (uint16_t)a->x);
+        ok = ok && mem_put_u16_le(out, cap, &pos, (uint16_t)a->y);
+        ok = ok && mem_put_u8(out, cap, &pos, a->enabled ? 1 : 0);
+        ok = ok && mem_put_u8(out, cap, &pos, a->speed <= ANIM_SPEED_FAST ? a->speed : ANIM_SPEED_OFF);
+        for (int st = 0; ok && st < 3; st++) for (int fr = 0; ok && fr < ANIM_FRAMES; fr++) for (int row = 0; ok && row < ENEMY_SPRITE_ROWS; row++) ok = ok && mem_put_u16_le(out, cap, &pos, a->frames[st][fr][row]);
+    }
+
+    /* EANM version 1: enemy animation data, off by default. */
+    ok = ok && mem_put_u8(out, cap, &pos, 'E') && mem_put_u8(out, cap, &pos, 'A') && mem_put_u8(out, cap, &pos, 'N') && mem_put_u8(out, cap, &pos, 'M');
+    ok = ok && mem_put_u8(out, cap, &pos, 1);
+    int ea_count = (lv == &g_level) ? g_enemy_anim_count : 0;
+    if (ea_count > MAX_ENEMIES) ea_count = MAX_ENEMIES;
+    ok = ok && mem_put_u8(out, cap, &pos, (uint8_t)ea_count);
+    for (int ai = 0; ok && ai < ea_count; ai++) {
+        const EnemyAnim *a = &g_enemy_anims[ai];
+        ok = ok && mem_put_u16_le(out, cap, &pos, (uint16_t)a->x);
+        ok = ok && mem_put_u16_le(out, cap, &pos, (uint16_t)a->y);
+        ok = ok && mem_put_u8(out, cap, &pos, a->enabled ? 1 : 0);
+        ok = ok && mem_put_u8(out, cap, &pos, a->speed <= ANIM_SPEED_FAST ? a->speed : ANIM_SPEED_OFF);
+        for (int st = 0; ok && st < 4; st++) for (int fr = 0; ok && fr < ANIM_FRAMES; fr++) for (int row = 0; ok && row < ENEMY_SPRITE_ROWS; row++) ok = ok && mem_put_u16_le(out, cap, &pos, a->frames[st][fr][row]);
     }
 
     /* Weapon stat/name chunk */
@@ -441,6 +497,8 @@ static void reset_level_metadata_defaults(void) {
     memset(g_npcs, 0, sizeof(g_npcs));
     memset(g_enemy_metas, 0, sizeof(g_enemy_metas));
     clear_room_overlay();
+    clear_texture_overlays();
+    clear_extended_entity_metadata();
     g_npc_count = 0;
     g_enemy_meta_count = 0;
     g_loaded_npc_metadata = false;
@@ -468,6 +526,76 @@ static void parse_bw3_chunks(const uint8_t *p, size_t size) {
             for (uint32_t ri = 0; ri < count; ri++) {
                 uint8_t rv = p[pos++] & 0x0F;
                 if (ri < copy_count) g_room_tiles[ri] = rv <= MAX_ROOM_ID ? rv : ROOM_NONE;
+            }
+        } else if (a == 'W' && b == 'T' && c == 'X' && d == '1') {
+            if (pos + 4 > size) break;
+            uint32_t count = read_u32_le(p + pos); pos += 4;
+            uint32_t max_count = (uint32_t)(g_load_temp.width * g_load_temp.height);
+            if (count > MAX_TILES || pos + count > size) break;
+            uint32_t copy_count = count < max_count ? count : max_count;
+            for (uint32_t i = 0; i < count; i++) {
+                uint8_t v = p[pos++] & MAX_TEXTURE_ID;
+                if (i < copy_count) g_wall_textures[i] = v;
+            }
+        } else if (a == 'F' && b == 'T' && c == 'X' && d == '1') {
+            if (pos + 4 > size) break;
+            uint32_t count = read_u32_le(p + pos); pos += 4;
+            uint32_t max_count = (uint32_t)(g_load_temp.width * g_load_temp.height);
+            if (count > MAX_TILES || pos + count > size) break;
+            uint32_t copy_count = count < max_count ? count : max_count;
+            for (uint32_t i = 0; i < count; i++) {
+                uint8_t v = p[pos++] & MAX_TEXTURE_ID;
+                if (i < copy_count) g_floor_textures[i] = v;
+            }
+        } else if (a == 'D' && b == 'T' && c == 'X' && d == '1') {
+            if (pos >= size) break;
+            int count = p[pos++];
+            if (count > MAX_DOORS) count = MAX_DOORS;
+            for (int i = 0; i < count && g_door_meta_count < MAX_DOORS && pos + 11 <= size; i++) {
+                DoorMeta *dm = &g_door_metas[g_door_meta_count++];
+                memset(dm, 0, sizeof(*dm));
+                dm->active = true;
+                dm->x = read_u16_le(p + pos); pos += 2;
+                dm->y = read_u16_le(p + pos); pos += 2;
+                dm->texture_id = p[pos++] & MAX_TEXTURE_ID;
+                dm->group_id = p[pos++];
+                dm->door_type = p[pos++]; if (dm->door_type > DOOR_TYPE_SWITCH) dm->door_type = DOOR_TYPE_AUTO;
+                dm->speed = p[pos++]; if (dm->speed > DOOR_SPEED_FAST) dm->speed = DOOR_SPEED_MEDIUM;
+                dm->move_dir = p[pos++]; if (dm->move_dir > DOOR_MOVE_RIGHT) dm->move_dir = DOOR_MOVE_UP;
+                dm->switch_pressed = p[pos++] != 0;
+                dm->toggled = p[pos++] != 0;
+            }
+        } else if (a == 'N' && b == 'A' && c == 'N' && d == 'M') {
+            if (pos + 2 > size) break;
+            uint8_t version = p[pos++];
+            int count = p[pos++];
+            if (version != 1) break;
+            if (count > MAX_NPCS) count = MAX_NPCS;
+            for (int i = 0; i < count && g_npc_anim_count < MAX_NPCS && pos + 294 <= size; i++) {
+                NPCAnim *an = &g_npc_anims[g_npc_anim_count++];
+                memset(an, 0, sizeof(*an));
+                an->active = true;
+                an->x = read_u16_le(p + pos); pos += 2;
+                an->y = read_u16_le(p + pos); pos += 2;
+                an->enabled = p[pos++] != 0;
+                an->speed = p[pos++]; if (an->speed > ANIM_SPEED_FAST) an->speed = ANIM_SPEED_OFF;
+                for (int st = 0; st < 3; st++) for (int fr = 0; fr < ANIM_FRAMES; fr++) for (int row = 0; row < ENEMY_SPRITE_ROWS; row++) { an->frames[st][fr][row] = read_u16_le(p + pos); pos += 2; }
+            }
+        } else if (a == 'E' && b == 'A' && c == 'N' && d == 'M') {
+            if (pos + 2 > size) break;
+            uint8_t version = p[pos++];
+            int count = p[pos++];
+            if (version != 1) break;
+            if (count > MAX_ENEMIES) count = MAX_ENEMIES;
+            for (int i = 0; i < count && g_enemy_anim_count < MAX_ENEMIES && pos + 390 <= size; i++) {
+                EnemyAnim *an = &g_enemy_anims[g_enemy_anim_count++];
+                memset(an, 0, sizeof(*an));
+                an->active = true;
+                an->x = read_u16_le(p + pos); pos += 2;
+                an->y = read_u16_le(p + pos); pos += 2;
+                an->enabled = p[pos++] != 0;
+                an->speed = p[pos++]; if (an->speed > ANIM_SPEED_FAST) an->speed = ANIM_SPEED_OFF;
+                for (int st = 0; st < 4; st++) for (int fr = 0; fr < ANIM_FRAMES; fr++) for (int row = 0; row < ENEMY_SPRITE_ROWS; row++) { an->frames[st][fr][row] = read_u16_le(p + pos); pos += 2; }
             }
         } else if (a == 'W' && b == 'L' && c == 'D' && d == '5') {
             if (pos >= size) break;
