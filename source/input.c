@@ -515,6 +515,20 @@ static uint16_t *sprite_edit_enemy16_pixels(void) {
         EnemyMeta *m = enemy_meta_find_at(g_entity_edit_x, g_entity_edit_y);
         return m ? m->sprite16 : NULL;
     }
+    if (g_sprite_edit_target == SPRITE_TARGET_NPC_ANIM) {
+        NPCAnim *a = npc_anim_ensure_at(g_entity_edit_x, g_entity_edit_y);
+        if (!a) return NULL;
+        g_anim_edit_state = clampi32(g_anim_edit_state, 0, 2);
+        g_anim_edit_frame = clampi32(g_anim_edit_frame, 0, ANIM_FRAMES - 1);
+        return a->frames[g_anim_edit_state][g_anim_edit_frame];
+    }
+    if (g_sprite_edit_target == SPRITE_TARGET_ENEMY_ANIM) {
+        EnemyAnim *a = enemy_anim_ensure_at(g_entity_edit_x, g_entity_edit_y);
+        if (!a) return NULL;
+        g_anim_edit_state = clampi32(g_anim_edit_state, 0, 3);
+        g_anim_edit_frame = clampi32(g_anim_edit_frame, 0, ANIM_FRAMES - 1);
+        return a->frames[g_anim_edit_state][g_anim_edit_frame];
+    }
     return NULL;
 }
 
@@ -548,6 +562,14 @@ static uint8_t *sprite_edit_color_ptr(void) {
         return &g_weapons[wi].color_id;
     }
     if (g_sprite_edit_target == SPRITE_TARGET_DEFAULT_NPC) return &g_default_npc_color;
+    if (g_sprite_edit_target == SPRITE_TARGET_NPC_ANIM) {
+        NPC *n = npc_find_at(g_entity_edit_x, g_entity_edit_y);
+        return n ? &n->color_id : NULL;
+    }
+    if (g_sprite_edit_target == SPRITE_TARGET_ENEMY_ANIM) {
+        EnemyMeta *m = enemy_meta_find_at(g_entity_edit_x, g_entity_edit_y);
+        return m ? &m->color_id : NULL;
+    }
     return NULL;
 }
 
@@ -560,6 +582,28 @@ void open_sprite_editor(int target) {
     uint32_t *bsp = sprite_edit_boss_pixels();
     uint16_t *esp = sprite_edit_enemy16_pixels();
     if (target == SPRITE_TARGET_NPC) { NPC *n = npc_find_at(g_entity_edit_x, g_entity_edit_y); if (n) ensure_npc_sprite16_or_default(n->sprite16, n->sprite); }
+    if (target == SPRITE_TARGET_NPC_ANIM) {
+        NPC *n = npc_find_at(g_entity_edit_x, g_entity_edit_y);
+        NPCAnim *a = npc_anim_ensure_at(g_entity_edit_x, g_entity_edit_y);
+        if (n && a) {
+            g_anim_edit_state = clampi32(g_anim_edit_state, 0, 2);
+            g_anim_edit_frame = clampi32(g_anim_edit_frame, 0, ANIM_FRAMES - 1);
+            bool empty = true;
+            for (int si = 0; si < ENEMY_SPRITE_ROWS; si++) if (a->frames[g_anim_edit_state][g_anim_edit_frame][si]) empty = false;
+            if (empty) memcpy(a->frames[g_anim_edit_state][g_anim_edit_frame], n->sprite16, sizeof(uint16_t) * ENEMY_SPRITE_ROWS);
+        }
+    }
+    if (target == SPRITE_TARGET_ENEMY_ANIM) {
+        EnemyMeta *m = enemy_meta_find_at(g_entity_edit_x, g_entity_edit_y);
+        EnemyAnim *a = enemy_anim_ensure_at(g_entity_edit_x, g_entity_edit_y);
+        if (m && a) {
+            g_anim_edit_state = clampi32(g_anim_edit_state, 0, 3);
+            g_anim_edit_frame = clampi32(g_anim_edit_frame, 0, ANIM_FRAMES - 1);
+            bool empty = true;
+            for (int si = 0; si < ENEMY_SPRITE_ROWS; si++) if (a->frames[g_anim_edit_state][g_anim_edit_frame][si]) empty = false;
+            if (empty) memcpy(a->frames[g_anim_edit_state][g_anim_edit_frame], m->sprite16, sizeof(uint16_t) * ENEMY_SPRITE_ROWS);
+        }
+    }
     if (target == SPRITE_TARGET_DEFAULT_NPC) ensure_npc_sprite16_or_default(g_default_npc_sprite16, g_default_npc_sprite);
     if (bsp) ensure_boss_sprite_or_default(bsp);
     else if (esp) {
@@ -569,7 +613,7 @@ void open_sprite_editor(int target) {
         uint8_t *sp = sprite_edit_pixels();
         if (sp) ensure_sprite_or_default(sp, target == SPRITE_TARGET_DEFAULT_NPC ? SPRITE_TARGET_NPC : target);
     }
-    snprintf(g_status, sizeof(g_status), target == SPRITE_TARGET_BOSS ? "BOSS ART 32X32" : ((target == SPRITE_TARGET_NPC || target == SPRITE_TARGET_DEFAULT_NPC) ? "NPC ART 16X16" : "SPRITE EDIT"));
+    snprintf(g_status, sizeof(g_status), target == SPRITE_TARGET_BOSS ? "BOSS ART 32X32" : ((target == SPRITE_TARGET_NPC || target == SPRITE_TARGET_DEFAULT_NPC || target == SPRITE_TARGET_NPC_ANIM || target == SPRITE_TARGET_ENEMY_ANIM) ? "ART 16X16" : "SPRITE EDIT"));
 }
 
 void handle_sprite_edit_input(u32 kDown) {
@@ -648,7 +692,7 @@ void handle_sprite_edit_input(u32 kDown) {
     if (kDown & KEY_Y) {
         if (boss_art) copy_default_boss_sprite(bsp);
         else if (enemy_art) {
-            if (g_sprite_edit_target == SPRITE_TARGET_NPC || g_sprite_edit_target == SPRITE_TARGET_DEFAULT_NPC) copy_default_npc_sprite16(esp);
+            if (g_sprite_edit_target == SPRITE_TARGET_NPC || g_sprite_edit_target == SPRITE_TARGET_DEFAULT_NPC || g_sprite_edit_target == SPRITE_TARGET_NPC_ANIM) copy_default_npc_sprite16(esp);
             else copy_default_enemy_sprite16(esp);
         } else {
             int kind = g_sprite_edit_target;
@@ -938,8 +982,9 @@ static EnemyMeta *entity_editor_enemy_meta(void) {
 }
 
 static int entity_editor_row_count(void) {
-    if (g_entity_edit_mode == EDIT_MODE_NPC) return 14;
-    if (g_entity_edit_mode == EDIT_MODE_ENEMY) return 23;
+    if (g_entity_edit_mode == EDIT_MODE_NPC) return 19;
+    if (g_entity_edit_mode == EDIT_MODE_ENEMY) return 28;
+    if (g_entity_edit_mode == EDIT_MODE_DOOR) return 9;
     if (g_entity_edit_mode == EDIT_MODE_WEAPON) return 8;
     if (g_entity_edit_mode == EDIT_MODE_SPRITE) return 1;
     return 1;
@@ -1015,6 +1060,15 @@ void open_entity_editor_at(int x, int y) {
         g_entity_edit_x = x;
         g_entity_edit_y = y;
         snprintf(g_status, sizeof(g_status), "ENEMY EDIT %d %d", x, y);
+    } else if (t == TILE_DOOR) {
+        DoorMeta *dm = door_meta_ensure_at(x, y);
+        if (!dm) return;
+        g_entity_edit_mode = EDIT_MODE_DOOR;
+        g_entity_edit_cursor = 0;
+        g_entity_edit_scroll = 0;
+        g_entity_edit_x = x;
+        g_entity_edit_y = y;
+        snprintf(g_status, sizeof(g_status), "DOOR EDIT %d %d", x, y);
     }
 }
 
@@ -1113,7 +1167,12 @@ void handle_entity_edit_input(u32 kDown) {
                     else open_weapon_editor(0);
                 }
                 break;
-            case 13: if (kDown & KEY_A) close_entity_editor(); break;
+            case 13: { NPCAnim *a = npc_anim_ensure_at(n->x, n->y); if (a && (dir || (kDown & KEY_A))) { a->enabled = !a->enabled; if (a->enabled && a->speed == ANIM_SPEED_OFF) a->speed = ANIM_SPEED_MEDIUM; g_dirty = true; } } break;
+            case 14: { NPCAnim *a = npc_anim_ensure_at(n->x, n->y); if (a && (dir || (kDown & KEY_A))) { a->speed = (uint8_t)((a->speed + (dir < 0 ? 3 : 1)) % 4); a->enabled = a->speed != ANIM_SPEED_OFF; g_dirty = true; } } break;
+            case 15: if (dir || (kDown & KEY_A)) { g_anim_edit_state = (g_anim_edit_state + (dir < 0 ? 2 : 1)) % 3; } break;
+            case 16: if (dir || (kDown & KEY_A)) { g_anim_edit_frame = (g_anim_edit_frame + (dir < 0 ? ANIM_FRAMES - 1 : 1)) % ANIM_FRAMES; } break;
+            case 17: if (kDown & KEY_A) { npc_anim_ensure_at(n->x, n->y); open_sprite_editor(SPRITE_TARGET_NPC_ANIM); } break;
+            case 18: if (kDown & KEY_A) close_entity_editor(); break;
         }
         snprintf(g_status, sizeof(g_status), "NPC Q%d %s", n->quest_type, text_speed_name(n->text_speed));
         return;
@@ -1189,10 +1248,33 @@ void handle_entity_edit_input(u32 kDown) {
                 if (dir || big) { int step = big ? big * 5 : dir; g_player_health_max = clampi32(g_player_health_max + step, PLAYER_HEALTH_MIN, PLAYER_HEALTH_MAX); if (g_player_health > g_player_health_max) g_player_health = g_player_health_max; g_dirty = true; }
                 if (kDown & KEY_A) { g_player_health_max = prompt_int_value("Player max HP", g_player_health_max, PLAYER_HEALTH_MIN, PLAYER_HEALTH_MAX); if (g_player_health > g_player_health_max) g_player_health = g_player_health_max; g_dirty = true; }
                 break;
-            case 22: if (kDown & KEY_A) close_entity_editor(); break;
+            case 22: { EnemyAnim *a = enemy_anim_ensure_at(m->x, m->y); if (a && (dir || (kDown & KEY_A))) { a->enabled = !a->enabled; if (a->enabled && a->speed == ANIM_SPEED_OFF) a->speed = ANIM_SPEED_MEDIUM; g_dirty = true; } } break;
+            case 23: { EnemyAnim *a = enemy_anim_ensure_at(m->x, m->y); if (a && (dir || (kDown & KEY_A))) { a->speed = (uint8_t)((a->speed + (dir < 0 ? 3 : 1)) % 4); a->enabled = a->speed != ANIM_SPEED_OFF; g_dirty = true; } } break;
+            case 24: if (dir || (kDown & KEY_A)) { g_anim_edit_state = (g_anim_edit_state + (dir < 0 ? 3 : 1)) % 4; } break;
+            case 25: if (dir || (kDown & KEY_A)) { g_anim_edit_frame = (g_anim_edit_frame + (dir < 0 ? ANIM_FRAMES - 1 : 1)) % ANIM_FRAMES; } break;
+            case 26: if (kDown & KEY_A) { enemy_anim_ensure_at(m->x, m->y); open_sprite_editor(SPRITE_TARGET_ENEMY_ANIM); } break;
+            case 27: if (kDown & KEY_A) close_entity_editor(); break;
         }
         if (m->ai_rank == AI_RANK_BOSS && m->spawn_kind != AI_SPAWN_NONE && m->spawn_limit == 0) m->spawn_limit = 2;
         snprintf(g_status, sizeof(g_status), "%s HP%d ATK%d", ai_rank_name(m->ai_rank), m->hp, m->attack);
+        return;
+    }
+
+    if (g_entity_edit_mode == EDIT_MODE_DOOR) {
+        DoorMeta *d = door_meta_ensure_at(g_entity_edit_x, g_entity_edit_y);
+        if (!d) { close_entity_editor(); return; }
+        switch (g_entity_edit_cursor) {
+            case 0: if (dir || (kDown & KEY_A)) { d->texture_id = (uint8_t)((d->texture_id + (dir < 0 ? 7 : 1)) & MAX_TEXTURE_ID); g_dirty = true; } break;
+            case 1: if (dir || big) { int step = big ? big * 5 : dir; d->group_id = (uint8_t)clampi32((int)d->group_id + step, 0, 31); g_dirty = true; } if (kDown & KEY_A) { d->group_id = (uint8_t)prompt_int_value("Door group", d->group_id, 0, 31); g_dirty = true; } break;
+            case 2: if (dir || (kDown & KEY_A)) { d->door_type = (uint8_t)((d->door_type + (dir < 0 ? 3 : 1)) % 4); g_dirty = true; } break;
+            case 3: if (dir || (kDown & KEY_A)) { d->speed = (uint8_t)((d->speed + (dir < 0 ? 2 : 1)) % 3); g_dirty = true; } break;
+            case 4: if (dir || (kDown & KEY_A)) { d->move_dir = (uint8_t)((d->move_dir + (dir < 0 ? 3 : 1)) % 4); g_dirty = true; } break;
+            case 5: if (kDown & KEY_A) { d->switch_pressed = !d->switch_pressed; g_dirty = true; } break;
+            case 6: if (kDown & KEY_A) { d->toggled = !d->toggled; g_dirty = true; } break;
+            case 7: if (kDown & KEY_A) { set_wall_texture(&g_level, d->x, d->y, d->texture_id); set_floor_texture(&g_level, d->x, d->y, d->texture_id); g_dirty = true; } break;
+            case 8: if (kDown & KEY_A) close_entity_editor(); break;
+        }
+        snprintf(g_status, sizeof(g_status), "DOOR %s G%d %s", door_type_name(d->door_type), d->group_id, door_speed_name(d->speed));
         return;
     }
 
@@ -1329,17 +1411,54 @@ static const char *npc_quest_desc(const NPC *n) {
 
 static void update_npc_talk_timers(float dt) {
     for (int i = 0; i < g_npc_count; i++) {
-        if (!g_npcs[i].active || g_npcs[i].talk_timer <= 0.0f) continue;
-        float nx = (float)g_npcs[i].x + 0.5f;
-        float ny = (float)g_npcs[i].y + 0.5f;
+        NPC *n = &g_npcs[i];
+        if (!n->active) continue;
+        float nx = (float)n->x + 0.5f;
+        float ny = (float)n->y + 0.5f;
         float dx = g_level.player_x - nx;
         float dy = g_level.player_y - ny;
-        if ((dx * dx + dy * dy) > 12.0f * 12.0f) {
-            g_npcs[i].talk_timer = 0.0f;
-        } else if (g_npcs[i].talk_timer < 999.0f) {
-            g_npcs[i].talk_timer += dt;
+        float radius = (n->text_mode == TEXT_MODE_ALWAYS) ? 16.0f : 10.0f;
+        bool close = (dx * dx + dy * dy) <= radius * radius;
+        if (!close) {
+            n->talk_timer = 0.0f;
+            continue;
         }
+        n->known = true;
+        if (n->talk_timer <= 0.0f) n->talk_timer = 0.01f;
+        else if (n->talk_timer < 999.0f) n->talk_timer += dt;
     }
+}
+
+static bool toggle_nearby_door(Level *lv, u32 kDown) {
+    if (!lv || !(kDown & KEY_SELECT)) return false;
+    Door *best = NULL;
+    float best_d2 = 2.10f * 2.10f;
+    for (int i = 0; i < g_door_count; i++) {
+        Door *d = &g_doors[i];
+        if (!d->active || d->door_type != DOOR_TYPE_TOGGLE) continue;
+        float cx = (float)d->x + 0.5f;
+        float cy = (float)d->y + 0.5f;
+        float dx = lv->player_x - cx;
+        float dy = lv->player_y - cy;
+        float d2 = dx * dx + dy * dy;
+        if (d2 < best_d2) { best_d2 = d2; best = d; }
+    }
+    if (!best) return false;
+    bool next = !best->toggled;
+    int remaining = MAX_DOOR_GROUP_SIZE;
+    for (int i = 0; i < g_door_count && remaining > 0; i++) {
+        Door *d = &g_doors[i];
+        if (!d->active) continue;
+        bool same = best->group_id ? (d->group_id == best->group_id) : (d == best);
+        if (!same) continue;
+        d->toggled = next;
+        d->opening = next;
+        DoorMeta *dm = door_meta_find_at(d->x, d->y);
+        if (dm) dm->toggled = next;
+        remaining--;
+    }
+    snprintf(g_status, sizeof(g_status), next ? "DOOR TOGGLED OPEN" : "DOOR TOGGLED CLOSED");
+    return true;
 }
 
 static void talk_to_nearby_npc(Level *lv, u32 kDown) {
@@ -1357,13 +1476,12 @@ static void talk_to_nearby_npc(Level *lv, u32 kDown) {
         if (d2 < best_d2) { best_d2 = d2; best = n; }
     }
     if (!best) {
-        snprintf(g_status, sizeof(g_status), "NO NPC NEARBY");
+        snprintf(g_status, sizeof(g_status), "NO NPC QUEST NEARBY");
         return;
     }
-    best->talk_timer = 0.01f;
     best->known = true;
     if (best->completed) {
-        snprintf(g_status, sizeof(g_status), "NPC DONE %s", best->text);
+        snprintf(g_status, sizeof(g_status), "QUEST ALREADY COMPLETE");
         return;
     }
     if (!npc_quest_ready(best)) {
@@ -1377,7 +1495,7 @@ static void talk_to_nearby_npc(Level *lv, u32 kDown) {
     refresh_mission_totals();
     refresh_success_percent();
     spawn_reward_in_front(lv, best->reward_kind, best->reward_amount);
-    snprintf(g_status, sizeof(g_status), "QUEST DONE REWARD DROPPED");
+    snprintf(g_status, sizeof(g_status), "QUEST COMPLETE - REWARD DROPPED");
 }
 
 static void cycle_owned_weapon(void) {
@@ -1601,6 +1719,21 @@ void spawn_entities_from_level(const Level *lv) {
                 d->x = x;
                 d->y = y;
                 d->open_t = 0.0f;
+                DoorMeta *dm = door_meta_find_at(x, y);
+                if (!dm) dm = door_meta_ensure_at(x, y);
+                if (dm) {
+                    d->texture_id = dm->texture_id & MAX_TEXTURE_ID;
+                    d->group_id = dm->group_id;
+                    d->door_type = dm->door_type;
+                    d->speed = dm->speed;
+                    d->move_dir = dm->move_dir;
+                    d->switch_pressed = dm->switch_pressed;
+                    d->toggled = dm->toggled;
+                } else {
+                    d->door_type = DOOR_TYPE_AUTO;
+                    d->speed = DOOR_SPEED_MEDIUM;
+                    d->move_dir = DOOR_MOVE_UP;
+                }
             }
         }
     }
@@ -1622,6 +1755,49 @@ void spawn_entities_from_level(const Level *lv) {
             if (placed) break;
         }
     }
+}
+
+static void set_door_group_opening(uint8_t group_id, int only_x, int only_y, bool open, bool consume_key, Level *lv) {
+    int changed = 0;
+    int remaining = MAX_DOOR_GROUP_SIZE;
+    for (int i = 0; i < g_door_count && remaining > 0; i++) {
+        Door *d = &g_doors[i];
+        if (!d->active) continue;
+        bool same = false;
+        if (group_id != 0) same = (d->group_id == group_id);
+        else same = (d->x == only_x && d->y == only_y);
+        if (!same) continue;
+        d->opening = open;
+        if (open && d->open_t <= 0.0f) d->open_t = 0.01f;
+        changed++;
+        remaining--;
+    }
+    if (changed && consume_key && g_player_keys > 0) g_player_keys--;
+    (void)lv;
+}
+
+static bool door_switch_pressed_near(Level *lv, Door *d) {
+    if (!lv || !d) return false;
+
+    int px = (int)floorf(lv->player_x);
+    int py = (int)floorf(lv->player_y);
+    if (px < 0 || py < 0 || px >= lv->width || py >= lv->height) return false;
+
+    uint8_t player_tile = tile_at(lv, px, py);
+    if (player_tile != PLATFORM_TILE) return false;
+
+    int remaining = MAX_DOOR_GROUP_SIZE;
+    for (int i = 0; i < g_door_count && remaining > 0; i++) {
+        Door *gd = &g_doors[i];
+        if (!gd->active) continue;
+        bool same = d->group_id ? (gd->group_id == d->group_id) : (gd == d);
+        if (!same) continue;
+        int md = abs(px - gd->x) + abs(py - gd->y);
+        if (md >= 2 && md <= 8) return true;
+        remaining--;
+    }
+
+    return false;
 }
 
 static void update_collectibles_and_doors(Level *lv, float dt) {
@@ -1666,37 +1842,45 @@ static void update_collectibles_and_doors(Level *lv, float dt) {
     for (int i = 0; i < g_door_count; i++) {
         Door *d = &g_doors[i];
         if (!d->active) continue;
+        float cx = (float)d->x + 0.5f;
+        float cy = (float)d->y + 0.5f;
+        float dx = lv->player_x - cx;
+        float dy = lv->player_y - cy;
+        bool near = (dx * dx + dy * dy) <= door_r2;
+        bool wants_open = false;
 
-        if (!d->opening) {
-            float cx = (float)d->x + 0.5f;
-            float cy = (float)d->y + 0.5f;
-            float dx = lv->player_x - cx;
-            float dy = lv->player_y - cy;
-
-            if ((dx * dx + dy * dy) <= door_r2) {
+        if (d->door_type == DOOR_TYPE_AUTO) {
+            wants_open = near;
+        } else if (d->door_type == DOOR_TYPE_KEY) {
+            if (near && d->open_t <= 0.0f) {
                 if (g_player_keys > 0) {
-                    g_player_keys--;
-                    d->opening = true;
-                    d->open_t = 0.01f;
-                    snprintf(g_status, sizeof(g_status), "DOOR OPENING  KEYS %d", g_player_keys);
+                    set_door_group_opening(d->group_id, d->x, d->y, true, true, lv);
+                    snprintf(g_status, sizeof(g_status), "KEY DOOR OPEN  KEYS %d", g_player_keys);
                 } else {
                     snprintf(g_status, sizeof(g_status), "NEED A KEY");
                 }
             }
+            wants_open = d->opening;
+        } else if (d->door_type == DOOR_TYPE_SWITCH) {
+            d->switch_pressed = door_switch_pressed_near(lv, d);
+            wants_open = d->switch_pressed;
+        } else if (d->door_type == DOOR_TYPE_TOGGLE) {
+            wants_open = d->toggled;
         }
 
+        if (d->door_type == DOOR_TYPE_AUTO || d->door_type == DOOR_TYPE_SWITCH || d->door_type == DOOR_TYPE_TOGGLE) {
+            if (d->group_id != 0) set_door_group_opening(d->group_id, d->x, d->y, wants_open, false, lv);
+            else d->opening = wants_open;
+        }
+
+        float seconds = door_speed_seconds(d->speed);
+        if (seconds < 0.05f) seconds = DOOR_OPEN_TIME;
         if (d->opening) {
-            d->open_t += dt / DOOR_OPEN_TIME;
-            if (d->open_t >= 1.0f) {
-                d->open_t = 1.0f;
-                d->active = false;
-                if (d->x >= 0 && d->y >= 0 && d->x < lv->width && d->y < lv->height) {
-                    if ((lv->tiles[d->y * lv->width + d->x] & MAX_TILE_ID) == TILE_DOOR) {
-                        lv->tiles[d->y * lv->width + d->x] = 0;
-                    }
-                }
-                snprintf(g_status, sizeof(g_status), "DOOR OPEN");
-            }
+            d->open_t += dt / seconds;
+            if (d->open_t > 1.0f) d->open_t = 1.0f;
+        } else {
+            d->open_t -= dt / seconds;
+            if (d->open_t < 0.0f) d->open_t = 0.0f;
         }
     }
 }
@@ -1716,7 +1900,9 @@ static bool ai_line_of_sight(const Level *lv, float x0, float y0, float x1, floa
         int tx = (int)(x0 + dx * t);
         int ty = (int)(y0 + dy * t);
         if (tx < 0 || ty < 0 || tx >= lv->width || ty >= lv->height) return false;
-        if (tile_blocks_side(lv->tiles[ty * lv->width + tx], 0.0f)) return false;
+        uint8_t tt = lv->tiles[ty * lv->width + tx] & MAX_TILE_ID;
+        if (tt == TILE_DOOR) { if (door_blocks_at(tx, ty)) return false; }
+        else if (tile_blocks_side(tt, 0.0f)) return false;
     }
 
     return true;
@@ -1789,7 +1975,7 @@ static void update_boss_projectiles(Level *lv, float dt) {
         pr->y += pr->vy * dt;
         int tx = (int)pr->x;
         int ty = (int)pr->y;
-        if (tx < 0 || ty < 0 || tx >= lv->width || ty >= lv->height || tile_blocks_side(tile_at(lv, tx, ty), 0.0f)) {
+        if (tx < 0 || ty < 0 || tx >= lv->width || ty >= lv->height || ((tile_at(lv, tx, ty) == TILE_DOOR) ? door_blocks_at(tx, ty) : tile_blocks_side(tile_at(lv, tx, ty), 0.0f))) {
             pr->active = false;
             continue;
         }
@@ -1994,8 +2180,23 @@ static bool ai_spawn_minion_for_boss(Level *lv, int parent_index) {
         e->color_id = (uint8_t)((boss->color_id + 1) & 7);
         copy_default_sprite(e->sprite, SPRITE_TARGET_ENEMY);
         copy_default_enemy_sprite16(e->sprite16);
+        int source_count = g_enemy_meta_count > 0 ? g_enemy_meta_count : g_enemy_count;
+        if (source_count > 0) {
+            int pick = (int)(rng_next(&g_random_seed) % (uint32_t)source_count);
+            if (g_enemy_meta_count > 0) {
+                EnemyMeta *src = &g_enemy_metas[pick % g_enemy_meta_count];
+                memcpy(e->sprite, src->sprite, SPRITE_BYTES);
+                memcpy(e->sprite16, src->sprite16, sizeof(e->sprite16));
+                e->color_id = src->color_id & 7;
+            } else {
+                Enemy *src = &g_enemies[pick % g_enemy_count];
+                memcpy(e->sprite, src->sprite, SPRITE_BYTES);
+                memcpy(e->sprite16, src->sprite16, sizeof(e->sprite16));
+                e->color_id = src->color_id & 7;
+            }
+        }
         ensure_enemy_sprite16_or_default(e->sprite16, e->sprite);
-        e->size_pct = boss->size_pct ? (uint8_t)clampi32((int)boss->size_pct - 20, 70, 105) : 90;
+        e->size_pct = boss->size_pct ? (uint8_t)clampi32((int)boss->size_pct - 42, 55, 82) : 70;
         e->speed_attr = boss->speed_attr ? boss->speed_attr : 100;
         e->text_count = 1;
         snprintf(e->text[0], sizeof(e->text[0]), "MINION");
@@ -2388,8 +2589,10 @@ void enter_slot(bool edit_mode) {
     g_play_start_y = g_level.player_y;
     g_play_start_z = g_level.player_z;
     g_play_start_angle = g_level.player_angle;
-    if (edit_mode) reset_runtime_entities();
-    else spawn_entities_from_level(&g_level);
+    /* Spawn a frozen runtime preview in editor mode so NPCs, enemies, coins,
+       doors, and pickups are visible in the 3D/editor views without running
+       AI, pickups, combat, or door triggers. */
+    spawn_entities_from_level(&g_level);
 }
 
 void apply_resize_menu(void) {
@@ -2671,7 +2874,7 @@ void update_physics_and_movement(float dt, u32 kDown, u32 kHeld) {
     update_npc_talk_timers(dt);
     if (kDown & KEY_Y) cycle_owned_weapon();
     attack_with_weapon(lv, kDown);
-    talk_to_nearby_npc(lv, kDown);
+    if (!toggle_nearby_door(lv, kDown)) talk_to_nearby_npc(lv, kDown);
 
     apply_vertical_physics(lv, dt, kDown, true);
     apply_lr_look(lv, dt, kHeld, true);
@@ -2807,7 +3010,7 @@ void editor_touch(u32 kDown, u32 kHeld) {
 
     uint8_t cur_tile = tile_at(lv, x, y);
     if (g_editor_tool == EDITOR_TOOL_SELECT) {
-        if (cur_tile == TILE_AI_SPAWN || cur_tile == TILE_NPC) {
+        if (cur_tile == TILE_AI_SPAWN || cur_tile == TILE_NPC || cur_tile == TILE_DOOR) {
             open_entity_editor_at(x, y);
         } else {
             g_selected_tile = cur_tile;
@@ -2822,7 +3025,7 @@ void editor_touch(u32 kDown, u32 kHeld) {
         snprintf(g_status, sizeof(g_status), "ROOM %d,%d %s", x, y, room_class_name(g_selected_room));
         return;
     }
-    if ((cur_tile == TILE_AI_SPAWN || cur_tile == TILE_NPC) && (kHeld & KEY_A)) {
+    if ((cur_tile == TILE_AI_SPAWN || cur_tile == TILE_NPC || cur_tile == TILE_DOOR) && (kHeld & KEY_A)) {
         open_entity_editor_at(x, y);
         return;
     }
@@ -2879,14 +3082,26 @@ void editor_touch(u32 kDown, u32 kHeld) {
     } else if (kHeld & KEY_B) {
         uint8_t old = tile_at(lv, x, y);
         set_tile(lv, x, y, 0);
-        if (old != 0) g_dirty = true;
+        if (old != 0) {
+            g_dirty = true;
+            if (old == TILE_AI_SPAWN || old == TILE_NPC || old == TILE_DOOR || old == TILE_DOT || old == TILE_PINK || old == TILE_PURPLE || old == TILE_KEY) {
+                spawn_entities_from_level(lv);
+            }
+        }
         snprintf(g_status, sizeof(g_status), "ERASE %d %d", x, y);
     } else {
         uint8_t old = tile_at(lv, x, y);
         set_tile(lv, x, y, g_selected_tile);
         if (g_selected_tile == TILE_NPC) npc_ensure_at(x, y);
         if (g_selected_tile == TILE_AI_SPAWN) enemy_meta_ensure_at(x, y);
-        if (old != g_selected_tile) g_dirty = true;
+        if (g_selected_tile == TILE_DOOR) door_meta_ensure_at(x, y);
+        if (old != g_selected_tile) {
+            g_dirty = true;
+            if (old == TILE_AI_SPAWN || old == TILE_NPC || old == TILE_DOOR || old == TILE_DOT || old == TILE_PINK || old == TILE_PURPLE || old == TILE_KEY ||
+                g_selected_tile == TILE_AI_SPAWN || g_selected_tile == TILE_NPC || g_selected_tile == TILE_DOOR || g_selected_tile == TILE_DOT || g_selected_tile == TILE_PINK || g_selected_tile == TILE_PURPLE || g_selected_tile == TILE_KEY) {
+                spawn_entities_from_level(lv);
+            }
+        }
         snprintf(g_status, sizeof(g_status), "PAINT %d %d", x, y);
     }
 }
