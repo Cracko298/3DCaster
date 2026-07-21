@@ -7,6 +7,7 @@ int main(int argc, char **argv) {
     gfxInitDefault();
     gfxSetDoubleBuffering(GFX_TOP, true);
     gfxSetDoubleBuffering(GFX_BOTTOM, true);
+    audio_init();
 
     Result fs_rc = fsInit();
     g_fs_ready = R_SUCCEEDED(fs_rc);
@@ -69,6 +70,7 @@ int main(int argc, char **argv) {
         gspWaitForVBlank();
     }
 
+    audio_shutdown();
     if (g_fs_ready) fsExit();
     gfxExit();
     return 0;
