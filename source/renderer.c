@@ -1229,13 +1229,17 @@ static void render_raycast_eye(const Level *lv, gfx3dSide_t side, float eye_offs
     }
 
     if (!g_render_angle_override) {
+        bool low_detail = g_fast_render || (g_fps_smooth < 45.0f);
         int item_budget = 0;
         int npc_budget = 0;
         int enemy_budget = 0;
-        for (int ci = 0; ci < g_collectible_count && item_budget < 18; ci++) {
+        int max_item_budget = low_detail ? 10 : 18;
+        int max_npc_budget = low_detail ? 6 : 10;
+        int max_enemy_budget = low_detail ? 12 : 20;
+        for (int ci = 0; ci < g_collectible_count && item_budget < max_item_budget; ci++) {
             const Collectible *c = &g_collectibles[ci];
             if (!c->active) continue;
-            if (!entity_in_front_and_near(pos_x, pos_y, dir_x, dir_y, c->fx, c->fy, ITEM_RENDER_DIST2)) continue;
+            if (!entity_in_front_and_near(pos_x, pos_y, dir_x, dir_y, c->fx, c->fy, low_detail ? (14.0f * 14.0f) : ITEM_RENDER_DIST2)) continue;
             item_budget++;
             float item_base_z = sprite_base_z_at(c->fx, c->fy);
             /* draw pickup shadows next to the matching sprite scale below */
@@ -1266,7 +1270,7 @@ static void render_raycast_eye(const Level *lv, gfx3dSide_t side, float eye_offs
                                              c->fx, c->fy, cz, scale, DOT_SPRITE_8X8, cc);
             }
         }
-        for (int ni = 0; ni < g_npc_count && npc_budget < 10; ni++) {
+        for (int ni = 0; ni < g_npc_count && npc_budget < max_npc_budget; ni++) {
             const NPC *n = &g_npcs[ni];
             if (!n->active) continue;
             const uint16_t *nsp16 = npc_anim_frame_for(n);
@@ -1275,7 +1279,7 @@ static void render_raycast_eye(const Level *lv, gfx3dSide_t side, float eye_offs
             for (int si = 0; si < ENEMY_SPRITE_ROWS; si++) if (nsp16[si]) npc16_empty = false;
             float nx = (float)n->x + 0.5f;
             float ny = (float)n->y + 0.5f;
-            if (!entity_in_front_and_near(pos_x, pos_y, dir_x, dir_y, nx, ny, NPC_RENDER_DIST2)) continue;
+            if (!entity_in_front_and_near(pos_x, pos_y, dir_x, dir_y, nx, ny, low_detail ? (18.0f * 18.0f) : NPC_RENDER_DIST2)) continue;
             npc_budget++;
             if (!npc16_empty) {
                 draw_ground_shadow(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y, nx, ny, sprite_base_z_at(nx, ny), 0.82f, mask16_visible_width_ratio(nsp16));
@@ -1316,10 +1320,10 @@ static void render_raycast_eye(const Level *lv, gfx3dSide_t side, float eye_offs
             draw_success_floor_marker(fb, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, center_y,
                                       g_success_x, g_success_y);
         }
-        for (int ei = 0; ei < g_enemy_count && enemy_budget < 20; ei++) {
+        for (int ei = 0; ei < g_enemy_count && enemy_budget < max_enemy_budget; ei++) {
             Enemy *e = &g_enemies[ei];
             if (!e->active) continue;
-            if (!entity_in_front_and_near(pos_x, pos_y, dir_x, dir_y, e->x, e->y, ENEMY_RENDER_DIST2)) continue;
+            if (!entity_in_front_and_near(pos_x, pos_y, dir_x, dir_y, e->x, e->y, low_detail ? (22.0f * 22.0f) : ENEMY_RENDER_DIST2)) continue;
             enemy_budget++;
             float edx = e->x - pos_x;
             float edy = e->y - pos_y;
