@@ -35,6 +35,8 @@
 #define SAVE_FS_BACKUP     "/bwl_slot%d.bwl"
 #define META_FS_PRIMARY    "/3ds/bwl_slot%d.meta"
 #define META_FS_BACKUP     "/bwl_slot%d.meta"
+#define STATE_FS_PRIMARY   "/3ds/bwl_state%d.bws"
+#define STATE_FS_BACKUP    "/bwl_state%d.bws"
 #define SETTINGS_FS_PRIMARY "/3ds/3dcaster_settings.cfg"
 #define SETTINGS_FS_BACKUP  "/3dcaster_settings.cfg"
 
@@ -179,6 +181,25 @@
 #define ENEMY_ANIM_ATTACK 2
 #define ENEMY_ANIM_SHOOT 3
 #define ANIM_FRAMES 3
+#define MAX_EVENT_FLAGS 64
+#define MAX_TRIGGERS 32
+#define MAX_SYNTH_PATTERNS 16
+#define MAX_SYNTH_NOTES 32
+#define AUDIO_EVENT_NONE 0
+#define AUDIO_EVENT_ATTACK 1
+#define AUDIO_EVENT_HIT 2
+#define AUDIO_EVENT_PICKUP 3
+#define AUDIO_EVENT_DOOR 4
+#define AUDIO_EVENT_QUEST 5
+#define AUDIO_EVENT_NPC 6
+#define AUDIO_EVENT_ENEMY 7
+#define AUDIO_EVENT_BOSS 8
+#define TRIGGER_ACTION_SET_FLAG 0
+#define TRIGGER_ACTION_CLEAR_FLAG 1
+#define TRIGGER_ACTION_TOGGLE_FLAG 2
+#define TRIGGER_ACTION_ADD_KEY 3
+#define TRIGGER_ACTION_HEAL 4
+
 #define RANDOM_MAZE_CELLS_W 31
 #define RANDOM_MAZE_CELLS_H 31
 #define RANDOM_MAZE_W (RANDOM_MAZE_CELLS_W * 4 + 2)
@@ -224,6 +245,7 @@ typedef struct {
 
 typedef struct {
     bool active;
+    uint16_t actor_id;
     float x, y, z;
     float start_x, start_y, start_z;
     float angle;
@@ -276,6 +298,7 @@ typedef struct {
 
 typedef struct {
     bool active;
+    uint16_t actor_id;
     bool opening;
     int x, y;
     float open_t;
@@ -290,6 +313,7 @@ typedef struct {
 
 typedef struct {
     bool active;
+    uint16_t actor_id;
     int x, y;
     uint8_t texture_id;
     uint8_t group_id;
@@ -322,6 +346,7 @@ typedef struct {
 
 typedef struct {
     bool active;
+    uint16_t actor_id;
     float x, y, z;
     float vx, vy;
     float life;
@@ -335,6 +360,7 @@ typedef struct {
 
 typedef struct {
     bool active;
+    uint16_t actor_id;
     int x, y;
     uint8_t color_id;
     uint8_t text_mode;
@@ -353,6 +379,7 @@ typedef struct {
 
 typedef struct {
     bool active;
+    uint16_t actor_id;
     int x, y;
     uint8_t hp;
     uint8_t attack;
@@ -378,6 +405,29 @@ typedef struct {
     uint8_t text_count;
     char text[ENEMY_TEXT_LINES][ENEMY_TEXT_MAX];
 } EnemyMeta;
+
+typedef struct {
+    bool active;
+    uint16_t actor_id;
+    int x, y;
+    uint8_t flag_id;
+    uint8_t action;
+    uint8_t amount;
+} TriggerMeta;
+
+typedef struct {
+    uint8_t pitch;
+    uint8_t length;
+    uint8_t wave;
+    uint8_t volume;
+} SynthNote;
+
+typedef struct {
+    bool active;
+    uint8_t event_id;
+    uint8_t note_count;
+    SynthNote notes[MAX_SYNTH_NOTES];
+} SynthPattern;
 
 typedef struct {
     char name[16];
@@ -427,6 +477,14 @@ extern uint8_t g_floor_textures[MAX_TILES];
 extern DoorMeta g_door_metas[MAX_DOORS];
 extern NPCAnim g_npc_anims[MAX_NPCS];
 extern EnemyAnim g_enemy_anims[MAX_ENEMIES];
+extern TriggerMeta g_triggers[MAX_TRIGGERS];
+extern int g_trigger_count;
+extern uint8_t g_event_flags[MAX_EVENT_FLAGS];
+extern SynthPattern g_audio_patterns[MAX_SYNTH_PATTERNS];
+extern int g_audio_pattern_count;
+extern bool g_audio_enabled;
+extern uint8_t g_audio_last_event;
+extern float g_audio_event_timer;
 extern WeaponDef g_weapons[MAX_WEAPONS];
 extern SlotInfo g_slots[SLOT_COUNT];
 extern bool g_in_menu;
@@ -579,6 +637,16 @@ const char *anim_speed_name(uint8_t s);
 float door_speed_seconds(uint8_t s);
 const uint16_t *npc_anim_frame_for(const NPC *n);
 const uint16_t *enemy_anim_frame_for(const Enemy *e);
+uint16_t actor_id_for_tile(uint8_t tile, int x, int y);
+void clear_event_flags(void);
+bool event_flag_get(uint8_t flag_id);
+void event_flag_set(uint8_t flag_id, bool value);
+void event_flag_toggle(uint8_t flag_id);
+void clear_triggers(void);
+void synth_reset_defaults(void);
+void synth_play_event(uint8_t event_id);
+void synth_update(float dt);
+const char *synth_event_name(uint8_t event_id);
 const char *room_class_name(uint8_t room);
 Color room_class_color(uint8_t room);
 bool tile_blocks_side(uint8_t tile, float z);
@@ -605,6 +673,7 @@ void make_slot_path(char *out, size_t out_size, bool backup);
 void make_slot_fs_path_for(int slot, char *out, size_t out_size, bool backup);
 void make_slot_fs_path(char *out, size_t out_size, bool backup);
 void make_meta_fs_path_for(int slot, char *out, size_t out_size, bool backup);
+void make_state_fs_path_for(int slot, char *out, size_t out_size, bool backup);
 bool mem_put_u8(uint8_t *out, size_t cap, size_t *pos, uint8_t v);
 bool mem_put_u16_le(uint8_t *out, size_t cap, size_t *pos, uint16_t v);
 bool mem_put_u32_le(uint8_t *out, size_t cap, size_t *pos, uint32_t v);
@@ -616,6 +685,10 @@ bool fs_delete_path(const char *fs_path);
 void default_slot_name(int slot, char *out, size_t out_size);
 bool save_slot_meta(int slot, const char *name);
 bool load_slot_meta(int slot, char *out, size_t out_size);
+bool load_slot_embedded_name(int slot, char *out, size_t out_size);
+bool save_world_state_slot(int slot);
+bool load_world_state_slot(int slot);
+void delete_world_state_slot(int slot);
 bool decode_bwl2_tiles(const uint8_t *data, size_t size, Level *lv);
 bool parse_bwl_data(const uint8_t *data, size_t len, Level *lv);
 int count_nonzero_tiles(const Level *lv);
