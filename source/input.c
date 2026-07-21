@@ -726,6 +726,7 @@ NPC *npc_ensure_at(int x, int y) {
     n = &g_npcs[g_npc_count++];
     memset(n, 0, sizeof(*n));
     n->active = true;
+    n->actor_id = actor_id_for_tile(TILE_NPC, x, y);
     n->x = x;
     n->y = y;
     n->color_id = g_default_npc_color & 7;
@@ -741,6 +742,7 @@ NPC *npc_ensure_at(int x, int y) {
     n->reward_kind = (uint8_t)(REWARD_WEAPON_BASE + ((x + y) % MAX_WEAPONS));
     n->reward_amount = 1;
     snprintf(n->text, sizeof(n->text), "HELP ME AND ILL REWARD YOU");
+    n->sound_id = AUDIO_ID_NPC;
     return n;
 }
 
@@ -758,6 +760,7 @@ EnemyMeta *enemy_meta_ensure_at(int x, int y) {
     m = &g_enemy_metas[g_enemy_meta_count++];
     memset(m, 0, sizeof(*m));
     m->active = true;
+    m->actor_id = actor_id_for_tile(TILE_AI_SPAWN, x, y);
     m->x = x;
     m->y = y;
     m->hp = (uint8_t)(5 + ((x + y) & 3));
@@ -781,6 +784,7 @@ EnemyMeta *enemy_meta_ensure_at(int x, int y) {
     m->speed_attr = 100;
     m->size_pct = 100;
     m->text_speed = TEXT_SPEED_MEDIUM;
+    m->sound_id = AUDIO_ID_ENEMY;
     m->text_count = 3;
     snprintf(m->text[0], sizeof(m->text[0]), "HEY");
     snprintf(m->text[1], sizeof(m->text[1]), "OUCH");
@@ -982,10 +986,10 @@ static EnemyMeta *entity_editor_enemy_meta(void) {
 }
 
 static int entity_editor_row_count(void) {
-    if (g_entity_edit_mode == EDIT_MODE_NPC) return 19;
-    if (g_entity_edit_mode == EDIT_MODE_ENEMY) return 28;
-    if (g_entity_edit_mode == EDIT_MODE_DOOR) return 9;
-    if (g_entity_edit_mode == EDIT_MODE_WEAPON) return 8;
+    if (g_entity_edit_mode == EDIT_MODE_NPC) return 20;
+    if (g_entity_edit_mode == EDIT_MODE_ENEMY) return 29;
+    if (g_entity_edit_mode == EDIT_MODE_DOOR) return 10;
+    if (g_entity_edit_mode == EDIT_MODE_WEAPON) return 9;
     if (g_entity_edit_mode == EDIT_MODE_SPRITE) return 1;
     return 1;
 }
@@ -1116,7 +1120,7 @@ void handle_entity_edit_input(u32 kDown) {
     if (kDown & KEY_TOUCH) {
         touchPosition tp;
         hidTouchRead(&tp);
-        int visible = (g_entity_edit_mode == EDIT_MODE_WEAPON) ? 8 : 12;
+        int visible = (g_entity_edit_mode == EDIT_MODE_WEAPON) ? 9 : 12;
         int row = g_entity_edit_scroll + (((int)tp.py - 40) / 15);
         if (row >= g_entity_edit_scroll && row < g_entity_edit_scroll + visible && row < rows && tp.px >= 8 && tp.px <= BOT_W - 8) {
             g_entity_edit_cursor = row;
@@ -1125,7 +1129,7 @@ void handle_entity_edit_input(u32 kDown) {
     }
     if (kDown & KEY_DUP) g_entity_edit_cursor = (g_entity_edit_cursor + rows - 1) % rows;
     if (kDown & KEY_DDOWN) g_entity_edit_cursor = (g_entity_edit_cursor + 1) % rows;
-    int visible_rows = (g_entity_edit_mode == EDIT_MODE_WEAPON) ? 8 : 12;
+    int visible_rows = (g_entity_edit_mode == EDIT_MODE_WEAPON) ? 9 : 12;
     if (g_entity_edit_cursor < g_entity_edit_scroll) g_entity_edit_scroll = g_entity_edit_cursor;
     if (g_entity_edit_cursor >= g_entity_edit_scroll + visible_rows) g_entity_edit_scroll = g_entity_edit_cursor - visible_rows + 1;
     if (g_entity_edit_scroll < 0) g_entity_edit_scroll = 0;
@@ -1172,7 +1176,8 @@ void handle_entity_edit_input(u32 kDown) {
             case 15: if (dir || (kDown & KEY_A)) { g_anim_edit_state = (g_anim_edit_state + (dir < 0 ? 2 : 1)) % 3; } break;
             case 16: if (dir || (kDown & KEY_A)) { g_anim_edit_frame = (g_anim_edit_frame + (dir < 0 ? ANIM_FRAMES - 1 : 1)) % ANIM_FRAMES; } break;
             case 17: if (kDown & KEY_A) { npc_anim_ensure_at(n->x, n->y); open_sprite_editor(SPRITE_TARGET_NPC_ANIM); } break;
-            case 18: if (kDown & KEY_A) close_entity_editor(); break;
+            case 18: if (dir || big || (kDown & KEY_A)) { int step = big ? big * 2 : (dir ? dir : 1); n->sound_id = (uint8_t)clampi32((int)n->sound_id + step, AUDIO_ID_NONE, AUDIO_ID_MUSIC); if (kDown & KEY_A) synth_play_sound(n->sound_id); g_dirty = true; } break;
+            case 19: if (kDown & KEY_A) close_entity_editor(); break;
         }
         snprintf(g_status, sizeof(g_status), "NPC Q%d %s", n->quest_type, text_speed_name(n->text_speed));
         return;
@@ -1253,7 +1258,8 @@ void handle_entity_edit_input(u32 kDown) {
             case 24: if (dir || (kDown & KEY_A)) { g_anim_edit_state = (g_anim_edit_state + (dir < 0 ? 3 : 1)) % 4; } break;
             case 25: if (dir || (kDown & KEY_A)) { g_anim_edit_frame = (g_anim_edit_frame + (dir < 0 ? ANIM_FRAMES - 1 : 1)) % ANIM_FRAMES; } break;
             case 26: if (kDown & KEY_A) { enemy_anim_ensure_at(m->x, m->y); open_sprite_editor(SPRITE_TARGET_ENEMY_ANIM); } break;
-            case 27: if (kDown & KEY_A) close_entity_editor(); break;
+            case 27: if (dir || big || (kDown & KEY_A)) { int step = big ? big * 2 : (dir ? dir : 1); m->sound_id = (uint8_t)clampi32((int)m->sound_id + step, AUDIO_ID_NONE, AUDIO_ID_MUSIC); if (kDown & KEY_A) synth_play_sound(m->sound_id); g_dirty = true; } break;
+            case 28: if (kDown & KEY_A) close_entity_editor(); break;
         }
         if (m->ai_rank == AI_RANK_BOSS && m->spawn_kind != AI_SPAWN_NONE && m->spawn_limit == 0) m->spawn_limit = 2;
         snprintf(g_status, sizeof(g_status), "%s HP%d ATK%d", ai_rank_name(m->ai_rank), m->hp, m->attack);
@@ -1272,7 +1278,8 @@ void handle_entity_edit_input(u32 kDown) {
             case 5: if (kDown & KEY_A) { d->switch_pressed = !d->switch_pressed; g_dirty = true; } break;
             case 6: if (kDown & KEY_A) { d->toggled = !d->toggled; g_dirty = true; } break;
             case 7: if (kDown & KEY_A) { set_wall_texture(&g_level, d->x, d->y, d->texture_id); set_floor_texture(&g_level, d->x, d->y, d->texture_id); g_dirty = true; } break;
-            case 8: if (kDown & KEY_A) close_entity_editor(); break;
+            case 8: if (dir || big || (kDown & KEY_A)) { int step = big ? big * 2 : (dir ? dir : 1); d->sound_id = (uint8_t)clampi32((int)d->sound_id + step, AUDIO_ID_NONE, AUDIO_ID_MUSIC); if (kDown & KEY_A) synth_play_sound(d->sound_id); g_dirty = true; } break;
+            case 9: if (kDown & KEY_A) close_entity_editor(); break;
         }
         snprintf(g_status, sizeof(g_status), "DOOR %s G%d %s", door_type_name(d->door_type), d->group_id, door_speed_name(d->speed));
         return;
@@ -1298,7 +1305,8 @@ void handle_entity_edit_input(u32 kDown) {
                 break;
             case 5: if (dir || (kDown & KEY_A)) { w->color_id = (uint8_t)((w->color_id + (dir < 0 ? 7 : 1)) & 7); g_dirty = true; } break;
             case 6: if (kDown & KEY_A) open_sprite_editor(SPRITE_TARGET_WEAPON); break;
-            case 7: if (kDown & KEY_A) close_entity_editor(); break;
+            case 7: if (dir || big || (kDown & KEY_A)) { int step = big ? big * 2 : (dir ? dir : 1); w->sound_id = (uint8_t)clampi32((int)w->sound_id + step, AUDIO_ID_NONE, AUDIO_ID_MUSIC); if (kDown & KEY_A) synth_play_sound(w->sound_id); g_dirty = true; } break;
+            case 8: if (kDown & KEY_A) close_entity_editor(); break;
         }
         snprintf(g_status, sizeof(g_status), "%s D%d R%d C%d", weapon_name(g_entity_edit_weapon), g_weapons[g_entity_edit_weapon].damage, g_weapons[g_entity_edit_weapon].range, g_weapons[g_entity_edit_weapon].cooldown);
         return;
@@ -1457,6 +1465,7 @@ static bool toggle_nearby_door(Level *lv, u32 kDown) {
         if (dm) dm->toggled = next;
         remaining--;
     }
+    synth_play_sound(best->sound_id ? best->sound_id : AUDIO_ID_DOOR);
     snprintf(g_status, sizeof(g_status), next ? "DOOR TOGGLED OPEN" : "DOOR TOGGLED CLOSED");
     return true;
 }
@@ -1480,6 +1489,7 @@ static void talk_to_nearby_npc(Level *lv, u32 kDown) {
         return;
     }
     best->known = true;
+    synth_play_sound(best->sound_id ? best->sound_id : AUDIO_ID_NPC);
     if (best->completed) {
         snprintf(g_status, sizeof(g_status), "QUEST ALREADY COMPLETE");
         return;
@@ -1495,6 +1505,7 @@ static void talk_to_nearby_npc(Level *lv, u32 kDown) {
     refresh_mission_totals();
     refresh_success_percent();
     spawn_reward_in_front(lv, best->reward_kind, best->reward_amount);
+    synth_play_sound(AUDIO_ID_QUEST);
     snprintf(g_status, sizeof(g_status), "QUEST COMPLETE - REWARD DROPPED");
 }
 
@@ -1545,6 +1556,7 @@ static void attack_with_weapon(Level *lv, u32 kDown) {
     g_slash_total = clampf32(0.18f + ((float)w->cooldown / 220.0f), 0.20f, 0.38f);
     g_slash_timer = g_slash_total;
     g_weapon_bounce_timer = 0.16f + clampf32((float)w->range * 0.025f, 0.0f, 0.12f);
+    synth_play_sound(w->sound_id ? w->sound_id : AUDIO_ID_ATTACK);
     if (best < 0) {
         snprintf(g_status, sizeof(g_status), "%s MISS", weapon_name(g_current_weapon));
         return;
@@ -1553,6 +1565,7 @@ static void attack_with_weapon(Level *lv, u32 kDown) {
     e->hp -= (int)w->damage;
     e->state = 1;
     e->hit_timer = 0.28f;
+    synth_play_sound(e->sound_id ? e->sound_id : AUDIO_ID_HIT);
     if (e->text_count > 0) {
         e->text_index = (uint8_t)((e->text_index + 1) % e->text_count);
         e->text_timer = 1.35f;
@@ -1621,6 +1634,7 @@ void spawn_entities_from_level(const Level *lv) {
                 g_enemies_total++;
                 memset(e, 0, sizeof(*e));
                 e->active = true;
+                e->actor_id = actor_id_for_tile(TILE_AI_SPAWN, x, y);
                 e->x = e->start_x = (float)x + 0.5f;
                 e->y = e->start_y = (float)y + 0.5f;
                 e->z = e->start_z = ground_height_at(lv, e->x, e->y, 0.0f);
@@ -1715,6 +1729,7 @@ void spawn_entities_from_level(const Level *lv) {
                 Door *d = &g_doors[g_door_count++];
                 memset(d, 0, sizeof(*d));
                 d->active = true;
+                d->actor_id = actor_id_for_tile(TILE_DOOR, x, y);
                 d->opening = false;
                 d->x = x;
                 d->y = y;
@@ -1729,10 +1744,12 @@ void spawn_entities_from_level(const Level *lv) {
                     d->move_dir = dm->move_dir;
                     d->switch_pressed = dm->switch_pressed;
                     d->toggled = dm->toggled;
+                    d->sound_id = dm->sound_id ? dm->sound_id : AUDIO_ID_DOOR;
                 } else {
                     d->door_type = DOOR_TYPE_AUTO;
                     d->speed = DOOR_SPEED_MEDIUM;
                     d->move_dir = DOOR_MOVE_UP;
+                    d->sound_id = AUDIO_ID_DOOR;
                 }
             }
         }
@@ -1813,6 +1830,7 @@ static void update_collectibles_and_doors(Level *lv, float dt) {
         float dz = lv->player_z - ground_height_at(lv, c->fx, c->fy, 0.0f);
         if ((dx * dx + dy * dy) <= key_r2 && fabsf(dz) < 0.85f) {
             c->active = false;
+            synth_play_sound(AUDIO_ID_PICKUP);
             if (g_collectibles_left > 0) g_collectibles_left--;
             if (c->kind == REWARD_KEY) {
                 g_player_keys++;
@@ -1847,6 +1865,7 @@ static void update_collectibles_and_doors(Level *lv, float dt) {
         float dx = lv->player_x - cx;
         float dy = lv->player_y - cy;
         bool near = (dx * dx + dy * dy) <= door_r2;
+        bool was_opening = d->opening;
         bool wants_open = false;
 
         if (d->door_type == DOOR_TYPE_AUTO) {
@@ -1872,6 +1891,8 @@ static void update_collectibles_and_doors(Level *lv, float dt) {
             if (d->group_id != 0) set_door_group_opening(d->group_id, d->x, d->y, wants_open, false, lv);
             else d->opening = wants_open;
         }
+
+        if (!was_opening && d->opening) synth_play_sound(d->sound_id ? d->sound_id : AUDIO_ID_DOOR);
 
         float seconds = door_speed_seconds(d->speed);
         if (seconds < 0.05f) seconds = DOOR_OPEN_TIME;
@@ -1918,6 +1939,7 @@ static void player_take_damage(Level *lv, int damage, const char *killer) {
     if (dmg > cap) dmg = cap;
 
     g_player_health -= dmg;
+    synth_play_sound(AUDIO_ID_HIT);
     g_player_hurt_timer = PLAYER_HURT_TIME;
     if (g_screen_shake_enabled) g_screen_shake_timer = 0.30f;
     if (g_player_health <= 0) {
@@ -1961,6 +1983,7 @@ static void spawn_boss_arrow(const Enemy *boss, const Level *lv) {
     pr->style = boss->projectile_style % 3;
     pr->anim = boss->projectile_anim ? 1 : 0;
     snprintf(pr->killer, sizeof(pr->killer), "%s SHOT", ai_rank_name(boss->ai_rank));
+    synth_play_sound(boss->sound_id ? boss->sound_id : AUDIO_ID_BOSS);
 }
 
 static void update_boss_projectiles(Level *lv, float dt) {
@@ -2154,6 +2177,7 @@ static bool ai_spawn_minion_for_boss(Level *lv, int parent_index) {
         Enemy *e = &g_enemies[g_enemy_count++];
         memset(e, 0, sizeof(*e));
         e->active = true;
+        e->actor_id = (uint16_t)(0x8000u | (uint16_t)(g_enemy_count & 0x7FFFu));
         e->x = e->start_x = nx;
         e->y = e->start_y = ny;
         e->z = e->start_z = ground_height_at(lv, nx, ny, 0.0f);
@@ -2198,6 +2222,7 @@ static bool ai_spawn_minion_for_boss(Level *lv, int parent_index) {
         ensure_enemy_sprite16_or_default(e->sprite16, e->sprite);
         e->size_pct = boss->size_pct ? (uint8_t)clampi32((int)boss->size_pct - 42, 55, 82) : 70;
         e->speed_attr = boss->speed_attr ? boss->speed_attr : 100;
+        e->sound_id = AUDIO_ID_ENEMY;
         e->text_count = 1;
         snprintf(e->text[0], sizeof(e->text[0]), "MINION");
         e->text_timer = 0.9f;
@@ -2562,6 +2587,7 @@ static void enter_random_seed_play(void) {
     g_play_start_z = g_level.player_z;
     g_play_start_angle = g_level.player_angle;
     spawn_entities_from_level(&g_level);
+    synth_start_music(g_level_music_id);
     snprintf(g_status, sizeof(g_status), "RANDOM SEED %04lX", (unsigned long)(seed & 0xFFFFu));
 }
 
@@ -2593,6 +2619,8 @@ void enter_slot(bool edit_mode) {
        doors, and pickups are visible in the 3D/editor views without running
        AI, pickups, combat, or door triggers. */
     spawn_entities_from_level(&g_level);
+    if (!edit_mode) { load_world_state_slot(g_slot); synth_start_music(g_level_music_id); }
+    else synth_stop_music();
 }
 
 void apply_resize_menu(void) {
@@ -2828,6 +2856,7 @@ void handle_world_menu_input(u32 kDown) {
 
 void update_physics_and_movement(float dt, u32 kDown, u32 kHeld) {
     Level *lv = &g_level;
+    synth_update(dt);
 
     if (g_player_hurt_timer > 0.0f) {
         g_player_hurt_timer -= dt;
@@ -3107,7 +3136,18 @@ void editor_touch(u32 kDown, u32 kHeld) {
 }
 
 void handle_global_input(u32 kDown, u32 kHeld) {
+    if (!g_edit_mode && !g_random_play && (kDown & KEY_X) && (kHeld & KEY_L)) {
+        save_world_state_slot(g_slot);
+        return;
+    }
+    if (!g_edit_mode && !g_random_play && (kDown & KEY_B) && (kHeld & KEY_L)) {
+        spawn_entities_from_level(&g_level);
+        load_world_state_slot(g_slot);
+        return;
+    }
+
     if (kDown & KEY_START) {
+        if (!g_edit_mode && !g_random_play && !g_level_won) save_world_state_slot(g_slot);
         if (g_edit_mode && g_entity_edit_mode != EDIT_MODE_NONE) {
             snprintf(g_status, sizeof(g_status), "B BACK FIRST");
             return;
@@ -3115,6 +3155,7 @@ void handle_global_input(u32 kDown, u32 kHeld) {
         if (g_dirty) save_bwl2(&g_level);
         refresh_all_slots();
         refresh_preview_slot();
+        synth_stop_music();
         g_in_menu = true;
         snprintf(g_status, sizeof(g_status), "RETURNED TO MENU");
         return;
