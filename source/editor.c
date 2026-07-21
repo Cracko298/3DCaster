@@ -34,7 +34,7 @@ static const char *entity_quest_name(int q) {
 }
 
 static void draw_entity_edit_row(u8 *fb, int row, const char *label, const char *value) {
-    int visible = (g_entity_edit_mode == EDIT_MODE_WEAPON) ? 8 : 12;
+    int visible = (g_entity_edit_mode == EDIT_MODE_WEAPON) ? 9 : 12;
     if (row < g_entity_edit_scroll || row >= g_entity_edit_scroll + visible) return;
     int y = 42 + (row - g_entity_edit_scroll) * 15;
     Color bg = (g_entity_edit_cursor == row) ? (Color){48, 66, 102} : (Color){16, 18, 28};
@@ -274,7 +274,8 @@ void render_entity_editor(u8 *fb) {
         snprintf(buf, sizeof(buf), "%d", g_anim_edit_state); draw_entity_edit_row(fb, 15, "ANIM STATE", buf);
         snprintf(buf, sizeof(buf), "%d", g_anim_edit_frame); draw_entity_edit_row(fb, 16, "ANIM FRAME", buf);
         draw_entity_edit_row(fb, 17, "EDIT ANIM", "A OPEN");
-        draw_entity_edit_row(fb, 18, "DONE", "A CLOSE");
+        snprintf(buf, sizeof(buf), "%d %s", n->sound_id, audio_sound_name(n->sound_id)); draw_entity_edit_row(fb, 18, "SOUND", buf);
+        draw_entity_edit_row(fb, 19, "DONE", "A CLOSE");
         draw_enemy16_sprite_preview_grid(fb, 258, 34, n->sprite16, npc_color_for(n->color_id), 3, -1, -1);
     } else if (g_entity_edit_mode == EDIT_MODE_ENEMY) {
         EnemyMeta *m = render_edit_enemy_meta();
@@ -312,7 +313,8 @@ void render_entity_editor(u8 *fb) {
         snprintf(buf, sizeof(buf), "%d", g_anim_edit_state); draw_entity_edit_row(fb, 24, "ANIM STATE", buf);
         snprintf(buf, sizeof(buf), "%d", g_anim_edit_frame); draw_entity_edit_row(fb, 25, "ANIM FRAME", buf);
         draw_entity_edit_row(fb, 26, "EDIT ANIM", "A OPEN");
-        draw_entity_edit_row(fb, 27, "DONE", "A CLOSE");
+        snprintf(buf, sizeof(buf), "%d %s", m->sound_id, audio_sound_name(m->sound_id)); draw_entity_edit_row(fb, 27, "SOUND", buf);
+        draw_entity_edit_row(fb, 28, "DONE", "A CLOSE");
         if (m->ai_rank == AI_RANK_BOSS) draw_boss_sprite_preview_grid(fb, 246, 34, m->boss_sprite, npc_color_for(m->color_id), 2, -1, -1);
         else draw_enemy16_sprite_preview_grid(fb, 258, 34, m->sprite16, npc_color_for(m->color_id), 3, -1, -1);
     } else if (g_entity_edit_mode == EDIT_MODE_DOOR) {
@@ -326,7 +328,8 @@ void render_entity_editor(u8 *fb) {
         draw_entity_edit_row(fb, 5, "SWITCH", d->switch_pressed ? "DOWN" : "UP");
         draw_entity_edit_row(fb, 6, "TOGGLED", d->toggled ? "OPEN" : "CLOSED");
         draw_entity_edit_row(fb, 7, "COPY TEX", "TO WALL/FLOOR");
-        draw_entity_edit_row(fb, 8, "DONE", "A CLOSE");
+        snprintf(buf, sizeof(buf), "%d %s", d->sound_id, audio_sound_name(d->sound_id)); draw_entity_edit_row(fb, 8, "SOUND", buf);
+        draw_entity_edit_row(fb, 9, "DONE", "A CLOSE");
     } else if (g_entity_edit_mode == EDIT_MODE_WEAPON) {
         int wi = clampi32(g_entity_edit_weapon, 0, MAX_WEAPONS - 1);
         WeaponDef *w = &g_weapons[wi];
@@ -337,7 +340,8 @@ void render_entity_editor(u8 *fb) {
         snprintf(buf, sizeof(buf), "%d", w->cooldown); draw_entity_edit_row(fb, 4, "COOLDOWN", buf);
         snprintf(buf, sizeof(buf), "%d", w->color_id & 7); draw_entity_edit_row(fb, 5, "COLOR", buf);
         draw_entity_edit_row(fb, 6, "EDIT ICON", "A OPEN");
-        draw_entity_edit_row(fb, 7, "DONE", "A CLOSE");
+        snprintf(buf, sizeof(buf), "%d %s", w->sound_id, audio_sound_name(w->sound_id)); draw_entity_edit_row(fb, 7, "SOUND", buf);
+        draw_entity_edit_row(fb, 8, "DONE", "A CLOSE");
         draw_sprite_preview_grid(fb, 270, 34, w->sprite, npc_color_for(w->color_id), 4, -1, -1);
     }
 }
