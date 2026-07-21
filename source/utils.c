@@ -120,10 +120,165 @@ void clear_texture_overlays(void) {
     memset(g_floor_textures, 0, sizeof(g_floor_textures));
 }
 
+uint16_t actor_id_for_tile(uint8_t tile, int x, int y) {
+    uint32_t base = ((uint32_t)(tile & 0x0F) << 12) ^ ((uint32_t)(y & 0xFF) << 6) ^ (uint32_t)(x & 0x3F);
+    base ^= ((uint32_t)(x & 0xC0) << 8) ^ ((uint32_t)(y & 0x100) << 6);
+    if (base == 0) base = 1;
+    return (uint16_t)(base & 0xFFFFu);
+}
+
+void clear_event_flags(void) {
+    memset(g_event_flags, 0, sizeof(g_event_flags));
+}
+
+bool event_flag_get(uint8_t flag_id) {
+    if (flag_id >= MAX_EVENT_FLAGS) return false;
+    return g_event_flags[flag_id] != 0;
+}
+
+void event_flag_set(uint8_t flag_id, bool value) {
+    if (flag_id >= MAX_EVENT_FLAGS) return;
+    g_event_flags[flag_id] = value ? 1 : 0;
+}
+
+void event_flag_toggle(uint8_t flag_id) {
+    if (flag_id >= MAX_EVENT_FLAGS) return;
+    g_event_flags[flag_id] ^= 1;
+}
+
+void clear_triggers(void) {
+    memset(g_triggers, 0, sizeof(g_triggers));
+    g_trigger_count = 0;
+}
+
+const char *synth_event_name(uint8_t event_id) {
+    switch (event_id) {
+        case AUDIO_EVENT_ATTACK: return "ATTACK";
+        case AUDIO_EVENT_HIT: return "HIT";
+        case AUDIO_EVENT_PICKUP: return "PICKUP";
+        case AUDIO_EVENT_DOOR: return "DOOR";
+        case AUDIO_EVENT_QUEST: return "QUEST";
+        case AUDIO_EVENT_NPC: return "NPC";
+        case AUDIO_EVENT_ENEMY: return "ENEMY";
+        case AUDIO_EVENT_BOSS: return "BOSS";
+        default: return "NONE";
+    }
+}
+
+const char *audio_sound_name(uint8_t sound_id) {
+    switch (sound_id) {
+        case AUDIO_ID_ATTACK: return "ATTACK";
+        case AUDIO_ID_HIT: return "HIT";
+        case AUDIO_ID_PICKUP: return "PICKUP";
+        case AUDIO_ID_DOOR: return "DOOR";
+        case AUDIO_ID_QUEST: return "QUEST";
+        case AUDIO_ID_NPC: return "NPC";
+        case AUDIO_ID_ENEMY: return "ENEMY";
+        case AUDIO_ID_BOSS: return "BOSS";
+        case AUDIO_ID_MUSIC: return "MUSIC";
+        case AUDIO_ID_NONE:
+        default: return "NONE";
+    }
+}
+
+uint8_t synth_default_sound_for_event(uint8_t event_id) {
+    switch (event_id) {
+        case AUDIO_EVENT_ATTACK: return AUDIO_ID_ATTACK;
+        case AUDIO_EVENT_HIT: return AUDIO_ID_HIT;
+        case AUDIO_EVENT_PICKUP: return AUDIO_ID_PICKUP;
+        case AUDIO_EVENT_DOOR: return AUDIO_ID_DOOR;
+        case AUDIO_EVENT_QUEST: return AUDIO_ID_QUEST;
+        case AUDIO_EVENT_NPC: return AUDIO_ID_NPC;
+        case AUDIO_EVENT_ENEMY: return AUDIO_ID_ENEMY;
+        case AUDIO_EVENT_BOSS: return AUDIO_ID_BOSS;
+        default: return AUDIO_ID_NONE;
+    }
+}
+
+static void synth_add_pattern(uint8_t sound_id, uint8_t kind, uint8_t loop, uint8_t event_id, const SynthNote *notes, int count) {
+    if (g_audio_pattern_count >= MAX_SYNTH_PATTERNS || !notes || count <= 0) return;
+    SynthPattern *p = &g_audio_patterns[g_audio_pattern_count++];
+    memset(p, 0, sizeof(*p));
+    p->active = true;
+    p->sound_id = sound_id;
+    p->kind = kind;
+    p->loop = loop ? 1 : 0;
+    p->event_id = event_id;
+    if (count > MAX_SYNTH_NOTES) count = MAX_SYNTH_NOTES;
+    p->note_count = (uint8_t)count;
+    for (int i = 0; i < count; i++) p->notes[i] = notes[i];
+}
+
+static void synth_add_default(uint8_t sound_id, uint8_t event_id, uint8_t pitch, uint8_t len, uint8_t wave, uint8_t vol) {
+    SynthNote n = { pitch, len, wave, vol };
+    synth_add_pattern(sound_id, AUDIO_KIND_SFX, 0, event_id, &n, 1);
+}
+
+void synth_reset_defaults(void) {
+    memset(g_audio_patterns, 0, sizeof(g_audio_patterns));
+    g_audio_pattern_count = 0;
+    g_audio_enabled = true;
+    g_audio_last_event = AUDIO_EVENT_NONE;
+    g_audio_event_timer = 0.0f;
+    g_level_music_id = AUDIO_ID_MUSIC;
+    synth_add_default(AUDIO_ID_ATTACK, AUDIO_EVENT_ATTACK, 64, 5, AUDIO_WAVE_SQUARE, 10);
+    synth_add_default(AUDIO_ID_HIT, AUDIO_EVENT_HIT, 38, 7, AUDIO_WAVE_NOISE, 12);
+    synth_add_default(AUDIO_ID_PICKUP, AUDIO_EVENT_PICKUP, 76, 8, AUDIO_WAVE_TRIANGLE, 9);
+    synth_add_default(AUDIO_ID_DOOR, AUDIO_EVENT_DOOR, 45, 12, AUDIO_WAVE_SAW, 8);
+    synth_add_default(AUDIO_ID_QUEST, AUDIO_EVENT_QUEST, 84, 18, AUDIO_WAVE_TRIANGLE, 12);
+    synth_add_default(AUDIO_ID_NPC, AUDIO_EVENT_NPC, 58, 9, AUDIO_WAVE_SINE, 6);
+    synth_add_default(AUDIO_ID_ENEMY, AUDIO_EVENT_ENEMY, 32, 10, AUDIO_WAVE_PULSE, 9);
+    synth_add_default(AUDIO_ID_BOSS, AUDIO_EVENT_BOSS, 26, 22, AUDIO_WAVE_SQUARE, 13);
+    SynthNote music[] = {
+        {48, 8, AUDIO_WAVE_TRIANGLE, 5}, {55, 8, AUDIO_WAVE_TRIANGLE, 5},
+        {60, 8, AUDIO_WAVE_TRIANGLE, 6}, {55, 8, AUDIO_WAVE_TRIANGLE, 5},
+        {50, 8, AUDIO_WAVE_TRIANGLE, 5}, {57, 8, AUDIO_WAVE_TRIANGLE, 5},
+        {62, 10, AUDIO_WAVE_TRIANGLE, 6}, {57, 6, AUDIO_WAVE_TRIANGLE, 5}
+    };
+    synth_add_pattern(AUDIO_ID_MUSIC, AUDIO_KIND_MUSIC, 1, AUDIO_EVENT_NONE, music, (int)(sizeof(music) / sizeof(music[0])));
+    for (int i = 0; i < MAX_WEAPONS; i++) if (!g_weapons[i].sound_id) g_weapons[i].sound_id = AUDIO_ID_ATTACK;
+}
+
+void synth_play_sound(uint8_t sound_id) {
+    if (!g_audio_enabled || sound_id == AUDIO_ID_NONE) return;
+    g_audio_last_event = AUDIO_EVENT_NONE;
+    g_audio_event_timer = 0.18f;
+    audio_play_sound(sound_id);
+}
+
+void synth_start_music(uint8_t sound_id) {
+    if (!g_audio_enabled || sound_id == AUDIO_ID_NONE) return;
+    audio_start_music(sound_id);
+}
+
+void synth_stop_music(void) {
+    audio_stop_music();
+}
+
+void synth_play_event(uint8_t event_id) {
+    if (!g_audio_enabled || event_id == AUDIO_EVENT_NONE) return;
+    g_audio_last_event = event_id;
+    g_audio_event_timer = 0.18f;
+    audio_play_event(event_id);
+}
+
+void synth_update(float dt) {
+    if (g_audio_event_timer > 0.0f) {
+        g_audio_event_timer -= dt;
+        if (g_audio_event_timer <= 0.0f) {
+            g_audio_event_timer = 0.0f;
+            g_audio_last_event = AUDIO_EVENT_NONE;
+        }
+    }
+    audio_update(dt);
+}
+
 void clear_extended_entity_metadata(void) {
     memset(g_door_metas, 0, sizeof(g_door_metas));
     memset(g_npc_anims, 0, sizeof(g_npc_anims));
     memset(g_enemy_anims, 0, sizeof(g_enemy_anims));
+    clear_triggers();
+    synth_reset_defaults();
     g_door_meta_count = 0;
     g_npc_anim_count = 0;
     g_enemy_anim_count = 0;
@@ -165,6 +320,7 @@ DoorMeta *door_meta_ensure_at(int x, int y) {
     m = &g_door_metas[g_door_meta_count++];
     memset(m, 0, sizeof(*m));
     m->active = true;
+    m->actor_id = actor_id_for_tile(TILE_DOOR, x, y);
     m->x = x;
     m->y = y;
     m->texture_id = 0;
@@ -172,6 +328,7 @@ DoorMeta *door_meta_ensure_at(int x, int y) {
     m->door_type = DOOR_TYPE_AUTO;
     m->speed = DOOR_SPEED_MEDIUM;
     m->move_dir = DOOR_MOVE_UP;
+    m->sound_id = AUDIO_ID_DOOR;
     return m;
 }
 
