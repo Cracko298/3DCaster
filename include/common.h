@@ -183,8 +183,26 @@
 #define ANIM_FRAMES 3
 #define MAX_EVENT_FLAGS 64
 #define MAX_TRIGGERS 32
-#define MAX_SYNTH_PATTERNS 16
+#define MAX_SYNTH_PATTERNS 24
 #define MAX_SYNTH_NOTES 32
+#define AUDIO_ID_NONE 0
+#define AUDIO_ID_ATTACK 1
+#define AUDIO_ID_HIT 2
+#define AUDIO_ID_PICKUP 3
+#define AUDIO_ID_DOOR 4
+#define AUDIO_ID_QUEST 5
+#define AUDIO_ID_NPC 6
+#define AUDIO_ID_ENEMY 7
+#define AUDIO_ID_BOSS 8
+#define AUDIO_ID_MUSIC 9
+#define AUDIO_KIND_SFX 0
+#define AUDIO_KIND_MUSIC 1
+#define AUDIO_WAVE_SINE 0
+#define AUDIO_WAVE_SQUARE 1
+#define AUDIO_WAVE_TRIANGLE 2
+#define AUDIO_WAVE_NOISE 3
+#define AUDIO_WAVE_PULSE 4
+#define AUDIO_WAVE_SAW 5
 #define AUDIO_EVENT_NONE 0
 #define AUDIO_EVENT_ATTACK 1
 #define AUDIO_EVENT_HIT 2
@@ -286,6 +304,7 @@ typedef struct {
     int parent_index;
     uint32_t boss_sprite[BOSS_SPRITE_ROWS];
     char text[ENEMY_TEXT_LINES][ENEMY_TEXT_MAX];
+    uint8_t sound_id;
 } Enemy;
 
 typedef struct {
@@ -309,6 +328,7 @@ typedef struct {
     uint8_t move_dir;
     bool switch_pressed;
     bool toggled;
+    uint8_t sound_id;
 } Door;
 
 typedef struct {
@@ -322,6 +342,7 @@ typedef struct {
     uint8_t move_dir;
     bool switch_pressed;
     bool toggled;
+    uint8_t sound_id;
 } DoorMeta;
 
 typedef struct {
@@ -355,6 +376,7 @@ typedef struct {
     uint8_t style;
     uint8_t anim;
     char killer[24];
+    uint8_t sound_id;
 } Projectile;
 
 
@@ -375,6 +397,7 @@ typedef struct {
     bool completed;
     bool known;
     char text[NPC_TEXT_MAX];
+    uint8_t sound_id;
 } NPC;
 
 typedef struct {
@@ -404,6 +427,7 @@ typedef struct {
     uint32_t boss_sprite[BOSS_SPRITE_ROWS];
     uint8_t text_count;
     char text[ENEMY_TEXT_LINES][ENEMY_TEXT_MAX];
+    uint8_t sound_id;
 } EnemyMeta;
 
 typedef struct {
@@ -424,6 +448,9 @@ typedef struct {
 
 typedef struct {
     bool active;
+    uint8_t sound_id;
+    uint8_t kind;
+    uint8_t loop;
     uint8_t event_id;
     uint8_t note_count;
     SynthNote notes[MAX_SYNTH_NOTES];
@@ -436,6 +463,7 @@ typedef struct {
     uint8_t cooldown;
     uint8_t color_id;
     uint8_t sprite[SPRITE_BYTES];
+    uint8_t sound_id;
 } WeaponDef;
 
 typedef struct {
@@ -485,6 +513,7 @@ extern int g_audio_pattern_count;
 extern bool g_audio_enabled;
 extern uint8_t g_audio_last_event;
 extern float g_audio_event_timer;
+extern uint8_t g_level_music_id;
 extern WeaponDef g_weapons[MAX_WEAPONS];
 extern SlotInfo g_slots[SLOT_COUNT];
 extern bool g_in_menu;
@@ -645,8 +674,20 @@ void event_flag_toggle(uint8_t flag_id);
 void clear_triggers(void);
 void synth_reset_defaults(void);
 void synth_play_event(uint8_t event_id);
+void synth_play_sound(uint8_t sound_id);
+void synth_start_music(uint8_t sound_id);
+void synth_stop_music(void);
 void synth_update(float dt);
+uint8_t synth_default_sound_for_event(uint8_t event_id);
 const char *synth_event_name(uint8_t event_id);
+const char *audio_sound_name(uint8_t sound_id);
+bool audio_init(void);
+void audio_shutdown(void);
+void audio_play_sound(uint8_t sound_id);
+void audio_play_event(uint8_t event_id);
+void audio_start_music(uint8_t sound_id);
+void audio_stop_music(void);
+void audio_update(float dt);
 const char *room_class_name(uint8_t room);
 Color room_class_color(uint8_t room);
 bool tile_blocks_side(uint8_t tile, float z);
